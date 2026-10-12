@@ -144,19 +144,23 @@ def analyze_new_products(
         )
 
     successful = [row for row in outcomes if row.launch_success]
+    observed_successful = [row for row in successful if row.current_observed]
     surviving = [row for row in successful if row.current_survival is True]
     early = [
         row
         for row in successful
         if row.first_threshold_month_index is not None
-        and row.first_threshold_month_index <= config.early_threshold_window_months
+        and 1 <= row.first_threshold_month_index <= config.early_threshold_window_months
     ]
     summary = NewProductSummary(
         total_products=len(outcomes),
         successful_products=len(successful),
         success_rate_pct=_pct(len(successful), len(outcomes)),
         surviving_successful_products=len(surviving),
-        survival_rate_among_successful_pct=_pct(len(surviving), len(successful)),
+        survival_rate_among_successful_pct=(_pct(len(surviving), len(observed_successful)) if observed_successful else None),
+        observed_successful_products=len(observed_successful),
+        unknown_successful_products=len(successful) - len(observed_successful),
+        current_observation_coverage_pct=(_pct(len(observed_successful), len(successful)) if successful else None),
         successful_with_early_threshold=len(early),
         early_threshold_share_among_successful_pct=_pct(len(early), len(successful)),
         current_month=current_month,

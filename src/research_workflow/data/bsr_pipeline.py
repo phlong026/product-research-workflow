@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import re
+import math
+import unicodedata
+from datetime import date
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -40,7 +43,8 @@ def _to_int(value: Any, default: int | None = 0) -> int | None:
     if value is None or value == "":
         return default
     try:
-        return int(float(str(value).replace(",", "").strip()))
+        number = float(str(value).replace(",", "").strip())
+        return int(number) if math.isfinite(number) and number >= 0 and number.is_integer() else default
     except (TypeError, ValueError):
         return default
 
@@ -59,9 +63,9 @@ def normalize_seller_region(value: Any, *, merge_cn_hk: bool = True) -> str:
 
 
 def _normal_title(value: str) -> str:
-    text = value.lower().strip()
+    text = unicodedata.normalize("NFKC", value).casefold().strip()
     text = re.sub(r"\s+", " ", text)
-    text = re.sub(r"[^a-z0-9 ]+", "", text)
+    text = "".join(c for c in text if c.isalnum() or c.isspace())
     return text
 
 
@@ -69,8 +73,12 @@ def parse_bsr_row(row: dict[str, Any], month: str, *, merge_cn_hk: bool = True) 
     asin = str(_first(row, ALIASES["asin"], "")).strip().upper()
     if not asin:
         return None
-    sales = _to_int(_first(row, ALIASES["monthly_sales"], 0), 0) or 0
+    sales = _to_int(_first(row, ALIASES["monthly_sales"], None), None)
+    if sales is None:
+        return None
     rank = _to_int(_first(row, ALIASES["node_rank"], None), None)
+    if rank == 0:
+        rank = None
     return BSRRecord(
         asin=asin,
         month=month,
@@ -94,7 +102,7 @@ def _prefer(a: BSRRecord, b: BSRRecord) -> BSRRecord:
     b_rank = b.node_rank if b.node_rank is not None else 10**9
     key_a = (a.monthly_sales, -a_rank, a.asin)
     key_b = (b.monthly_sales, -b_rank, b.asin)
-    return a if key_a >= key_b else b
+    return a if (-a.monthly_sales, a_rank, a.asin) <= (-b.monthly_sales, b_rank, b.asin) else b
 
 
 def _dedupe(records: list[BSRRecord], key_fn) -> list[BSRRecord]:
@@ -118,16 +126,13 @@ def build_monthly_top(
     config: MonthlyBSRConfig | None = None,
 ) -> MonthlyBSRResult:
     config = config or MonthlyBSRConfig()
+    validate_month(month)
+    if config.top_n < 1:
+        raise ValueError("top_n must be >= 1")
     source = list(rows)
     missing_asin_rows = sum(1 for row in source if not str(_first(row, ALIASES["asin"], "")).strip())
-    invalid_sales_rows = 0
-    for row in source:
-        value = _first(row, ALIASES["monthly_sales"], "")
-        if value not in (None, ""):
-            try:
-                float(str(value).replace(",", "").strip())
-            except (TypeError, ValueError):
-                invalid_sales_rows += 1
+    invalid_sales_rows = sum(_to_int(_first(row, ALIASES["monthly_sales"], None), None) is None
+                             for row in source)
     parsed = [
         record
         for row in source
@@ -143,7 +148,7 @@ def build_monthly_top(
             parent_rows,
             lambda r: (
                 f"title:{r.brand.lower().strip()}::{_normal_title(r.title)}"
-                if r.title.strip()
+                if _normal_title(r.title)
                 else f"asin:{r.asin}"
             ),
         )
@@ -174,3 +179,10 @@ def build_monthly_top(
             duplicate_title_rows_removed=len(parent_rows) - len(suspicious_rows),
         ),
     )
+
+
+def validate_month(month: str) -> str:
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}", month):
+        raise ValueError("month must be YYYY-MM")
+    date(int(month[:4]), int(month[5:]), 1)
+    return month

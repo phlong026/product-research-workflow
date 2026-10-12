@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import unicodedata
 from typing import Iterable
 
 from research_workflow.data.models import BSRRecord
@@ -62,7 +63,7 @@ def build_competition_metrics(
         brand_sales: dict[str, int] = defaultdict(int)
         for row in rows:
             # Missing brand must not collapse unrelated ASINs into one fake brand.
-            brand_key = row.brand.strip() or f"<unknown:{row.asin}>"
+            brand_key = unicodedata.normalize("NFKC", row.brand).strip().casefold() or f"<unknown:{row.asin}>"
             brand_sales[brand_key] += max(0, row.monthly_sales)
         brand_sorted = sorted(brand_sales.values(), reverse=True)
 

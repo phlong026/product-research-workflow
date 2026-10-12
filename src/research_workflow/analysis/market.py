@@ -156,7 +156,10 @@ def _parse_llm_report(
     for idx, item in enumerate(raw.get("findings", [])):
         if not isinstance(item, dict):
             continue
-        refs = tuple(str(x) for x in item.get("evidence_ids", []) if str(x) in evidence)
+        supplied = item.get("evidence_ids", [])
+        if not isinstance(supplied, list) or not supplied or any(not isinstance(x, str) or x not in evidence for x in supplied):
+            continue
+        refs = tuple(supplied)
         if not refs:
             # A finding without verified evidence is not allowed into the report.
             continue

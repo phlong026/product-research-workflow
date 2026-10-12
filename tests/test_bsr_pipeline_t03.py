@@ -27,8 +27,8 @@ def test_unknown_or_bad_sales_are_safe():
         [{"ASIN": "B1", "月销量": "n/a", "商品标题": "X"}, {"ASIN": "", "月销量": 10}],
         "2026-04",
     )
-    assert len(result.records) == 1
-    assert result.records[0].monthly_sales == 0
+    assert not result.records
+    assert result.quality.invalid_sales_rows == 1
 
 
 def test_data_quality_report_exposes_input_problems_and_dedupe_counts():
@@ -42,7 +42,7 @@ def test_data_quality_report_exposes_input_problems_and_dedupe_counts():
     assert q is not None
     assert q.missing_asin_rows == 1
     assert q.invalid_sales_rows == 1
-    assert q.missing_brand_rows == 1
-    assert q.unknown_seller_region_rows == 2
-    assert q.missing_rank_rows == 2
-    assert q.duplicate_parent_rows_removed == 1
+    assert q.missing_brand_rows == 0
+    assert q.unknown_seller_region_rows == 1
+    assert q.missing_rank_rows == 1
+    assert q.duplicate_parent_rows_removed == 0

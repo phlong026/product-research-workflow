@@ -112,6 +112,7 @@ def _find_in_list(items: list[Any], asin: str | None) -> Mapping[str, Any] | Non
             value = _first(item, ALIASES["asin"])
             if value and str(value).upper() == wanted:
                 return item
+        return None
     return candidates[0]
 
 
@@ -121,6 +122,8 @@ def profile_from_payload(payload: Any, *, asin: str, source: str) -> ASINProfile
         return None
 
     actual_asin = str(_first(item, ALIASES["asin"]) or asin).strip().upper()
+    if actual_asin != asin.strip().upper():
+        return None
     title = str(_first(item, ALIASES["title"]) or "").strip()
     bullets = _normalize_bullets(_first(item, BULLET_ALIASES))
     seller_region = normalize_seller_region(_first(item, ALIASES["seller_region"]))

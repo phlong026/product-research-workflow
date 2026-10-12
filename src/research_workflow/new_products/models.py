@@ -77,10 +77,13 @@ class NewProductSummary:
     successful_products: int
     success_rate_pct: float
     surviving_successful_products: int
-    survival_rate_among_successful_pct: float
+    survival_rate_among_successful_pct: float | None
     successful_with_early_threshold: int
     early_threshold_share_among_successful_pct: float
     current_month: str | None
+    observed_successful_products: int = 0
+    unknown_successful_products: int = 0
+    current_observation_coverage_pct: float | None = None
 
 
 @dataclass(slots=True)
