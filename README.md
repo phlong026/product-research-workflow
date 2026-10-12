@@ -1,10 +1,14 @@
 # Product Research Workflow
 
-Amazon/跨境选品的 **Research Workflow Engine**。系统自动完成数据获取、清洗、产品分类、市场/竞争/新品分析、研究路线建议和研究资料包；**最终商业 Yes/No 始终由人工决定**。
+Amazon/跨境选品的 **Research Workflow Engine**。当前可运行受控单机文件研究流程（清洗、规则分类、确定性市场/竞争/新品分析、人工确认研究路线和资料包）；**最终商业 Yes/No 始终由人工决定**。
 
-## 已完成
+## 当前交付边界
 
-T00–T11 核心代码均已实现并通过独立测试/专项评审：
+2026-10-12 整改说明、真实接口验收缺口、部署与备份步骤见 [RELEASE_READINESS](docs/RELEASE_READINESS.md)。CLI分类采用关键词规则，市场解释采用模板，ASIN补全尚未接入CLI；真实MCP、LLM与客户Golden Case未验收。实验API仅维护状态，不能后台执行研究；默认关闭，启用后仅环回地址加令牌可访问。
+
+## 模块实现
+
+以下模块具有实现与离线测试，模块存在不代表所有外部能力已接通：
 
 1. T00 — Ice Maker Golden Case / MCP foundation
 2. T01 — Research Project / Workflow State / Human Checkpoint
@@ -70,15 +74,15 @@ Human business decision
 - **LangGraph**：流程状态、暂停/恢复、人工检查。
 - **Python**：所有可确定计算；LLM 不负责算数。
 - **MCP**：SellerSprite/SIF/西柚/Apify；密钥只通过环境变量注入。
-- **LLM**：分类、解释、聚类；不得自动给出最终商业 Yes/No。
+- **LLM 扩展口**：支持接入分类、解释回调，当前CLI使用规则/模板；不得自动给出最终商业 Yes/No。
 
 ## Install
 
 ```bash
-python -m venv .venv
+uv sync --frozen --all-extras --python 3.12
 source .venv/bin/activate
-pip install -e '.[dev,workflow,data]'
-cp .env.example .env
+test -f .env || cp .env.example .env
+chmod 600 .env
 ```
 
 SellerSprite MCP：
@@ -91,7 +95,7 @@ npm install -g github:JieXi-11/SellerSprite
 
 ## Offline end-to-end demo
 
-不需要任何密钥：
+不需要任何密钥，输出目录必须为空或不存在（重复运行请换新目录）：
 
 ```bash
 python scripts/run_offline_demo.py --output runtime/offline-demo

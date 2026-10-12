@@ -1,11 +1,11 @@
 # Development Status
 
-T01–T11 纯代码主干已经开发完成。当前最终门禁：**67 tests passed + compileall PASS + offline end-to-end PASS**。
+2026-10-12：定位为受控单机研究试点。最新整改、测试与真实验收缺口见 [上线评审](docs/RELEASE_READINESS.md) 和 [测试证据](docs/release-readiness-20261012/RESULTS.md)。下表为模块级实现清单，✅ 不代表真实外部服务验收通过。
 
 | Task | 状态 | 已完成的核心输出 | 仍需 Mac / 真实环境 |
 |---|---|---|---|
 | T00 | ✅ | Ice Maker Golden Case manifest / baseline | 用客户原始 ZIP 做最终文件级复核 |
-| T01 | ✅ | Project / Run / Step state、checkpoint、pause/resume、idempotent resume、retry run | 安装 LangGraph 后做真实 interrupt/resume 联调 |
+| T01 | ✅ | Project / Run / Step state、checkpoint、pause/resume、idempotent resume、retry run | 离线 LangGraph interrupt/resume 已测；持久执行器与跨进程图恢复未实现 |
 | T02 | ✅ | SellerSprite/SIF/西柚/Apify MCP adapters；SellerSprite 业务接口、分页/重试/解包 | 登录 SellerSprite、注入密钥、真实 `list_tools/call_tool` |
 | T03 | ✅ | Monthly BSR parse、父体/标题去重、TopN、seller region、数据质量报告 | 用真实 SellerSprite 文件/API 做字段映射验收 |
 | T04 | ✅ | Vendor-neutral ASIN enrichment + primary/fallback merge | 实连 `asin_detail` / SIF fallback |
@@ -15,7 +15,7 @@ T01–T11 纯代码主干已经开发完成。当前最终门禁：**67 tests pa
 | T08 | ✅ | Top3/10 ASIN/品牌、累计 BSR 层级、头/腰/尾 band、虹吸信号 | 用 Golden Case 重算集中度/BSR 基线 |
 | T09 | ✅ | 新品 launch success / current survival、VC/SC、地区/细分汇总、缺月未知态 | 用 2024–2026 新品表重算 895/195/21.8%/80% |
 | T10 | ✅ | Human-confirmed Research Router + manual fallback | 前端实现研究支线多选确认 |
-| T11 | ✅ | JSON/CSV/Markdown/HTML Dossier + manifest；人工决策留空 | 浏览器看 ECharts、接真实来源索引 |
+| T11 | ✅ | JSON/CSV/Markdown/离线SVG HTML Dossier + manifest；人工决策留空 | 离线SVG图表与输入/审批证据已导出；真实业务来源仍待验收 |
 
 ## 后续插件化，不阻塞核心 Research Workflow
 

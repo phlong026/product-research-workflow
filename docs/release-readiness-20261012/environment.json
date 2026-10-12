@@ -1,0 +1,8 @@
+{
+  "python": "3.12.14",
+  "mcp": "2.3.0",
+  "langgraph": "1.2.14",
+  "fastapi": "0.143.0",
+  "uv": "0.12.23",
+  "offline_manifest_files": 17
+}
