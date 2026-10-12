@@ -7,7 +7,8 @@ from research_workflow.workflow import WorkflowService
 
 def test_project_and_checkpoint_api(tmp_path):
     service = WorkflowService(SQLiteStore(tmp_path / "api.db"))
-    client = TestClient(create_app(service))
+    client = TestClient(create_app(service, api_token="test-only"), client=("127.0.0.1", 50000),
+                        headers={"Authorization": "Bearer test-only"})
     created = client.post("/projects", json={"product": "Ice Maker", "marketplace": "US"})
     assert created.status_code == 200
     project_id = created.json()["project"]["id"]

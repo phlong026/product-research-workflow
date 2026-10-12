@@ -67,7 +67,8 @@ def test_retry_creates_new_run_and_retains_existing_state_refs():
 
 def test_run_api_contracts():
     service = WorkflowService(SQLiteStore())
-    client = TestClient(create_app(service))
+    client = TestClient(create_app(service, api_token="test-only"), client=("127.0.0.1", 50000),
+                        headers={"Authorization": "Bearer test-only"})
     project = client.post("/projects", json={"product": "ice maker", "marketplace": "US"}).json()
     project_id = project["project"]["id"]
 

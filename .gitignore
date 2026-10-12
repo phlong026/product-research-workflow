@@ -16,3 +16,11 @@ extension-state.json
 
 research_workflow.db
 *.db-journal
+
+# Local project databases, lock files and backups may contain research data.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.bak*
