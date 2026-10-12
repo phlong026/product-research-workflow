@@ -35,7 +35,8 @@ async def with_retries(
     call: Callable[[], Awaitable[T]],
     *,
     attempts: int = 3,
-    base_delay_seconds: float = 0.0,
+    base_delay_seconds: float = 0.25,
+    timeout_seconds: float = 120.0,
     retry_exceptions: tuple[type[BaseException], ...] = (Exception,),
 ) -> T:
     """Small retry primitive used by connector adapters.
@@ -48,11 +49,13 @@ async def with_retries(
     last: BaseException | None = None
     for index in range(attempts):
         try:
-            return await call()
+            return await asyncio.wait_for(call(), timeout=timeout_seconds)
+        except ConnectorError:
+            raise
         except retry_exceptions as exc:  # type: ignore[misc]
             last = exc
             if index + 1 >= attempts:
                 break
             if base_delay_seconds > 0:
                 await asyncio.sleep(base_delay_seconds * (2**index))
-    raise ConnectorError(f"connector call failed after {attempts} attempts: {last}") from last
+    raise ConnectorError(f"connector call failed after {attempts} attempts ({type(last).__name__})") from last
