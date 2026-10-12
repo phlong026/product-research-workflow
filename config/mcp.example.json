@@ -1,0 +1,39 @@
+{
+  "servers": {
+    "sellersprite": {
+      "transport": "stdio",
+      "command": "sellersprite-mcp",
+      "args": [],
+      "env": {
+        "SELLERSPRITE_CDP_URL": "${SELLERSPRITE_CDP_URL}"
+      }
+    },
+    "sif": {
+      "transport": "http",
+      "url": "${SIF_MCP_URL}",
+      "auth": {
+        "header": "${SIF_MCP_AUTH_HEADER}",
+        "scheme": "${SIF_MCP_AUTH_SCHEME}",
+        "token_env": "SIF_MCP_TOKEN"
+      }
+    },
+    "xiyou": {
+      "transport": "http",
+      "url": "${XIYOU_MCP_URL}",
+      "auth": {
+        "header": "${XIYOU_MCP_AUTH_HEADER}",
+        "scheme": "${XIYOU_MCP_AUTH_SCHEME}",
+        "token_env": "XIYOU_MCP_TOKEN"
+      }
+    },
+    "apify": {
+      "transport": "http",
+      "url": "${APIFY_MCP_URL}",
+      "auth": {
+        "header": "${APIFY_MCP_AUTH_HEADER}",
+        "scheme": "${APIFY_MCP_AUTH_SCHEME}",
+        "token_env": "APIFY_TOKEN"
+      }
+    }
+  }
+}
