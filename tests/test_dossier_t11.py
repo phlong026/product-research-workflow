@@ -112,6 +112,6 @@ def test_dossier_marks_human_as_decision_owner_without_auto_decision(tmp_path):
 def test_dashboard_contains_real_chart_payload_not_placeholder(tmp_path):
     root = ResearchDossierGenerator().generate(sample_input(tmp_path), tmp_path / "dossier")
     html = (root / "dashboard.html").read_text(encoding="utf-8")
-    assert "echarts.init" in html
+    assert 'id="chart-data"' in html and "<svg" in html
     assert '"2026-01"' in html
     assert '"nugget"' in html

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from research_workflow.analysis.models import MarketResearchReport
 from research_workflow.competition.models import CompetitionMetricsResult
@@ -32,4 +33,4 @@ class ResearchDossierInput:
     source_artifacts: list[SourceArtifact] = field(default_factory=list)
     data_quality: list[dict[str, object]] = field(default_factory=list)
     missing_evidence: list[str] = field(default_factory=list)
-    metadata: dict[str, str] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)

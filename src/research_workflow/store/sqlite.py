@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -30,9 +31,35 @@ class SQLiteStore:
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
         self._lock = threading.RLock()
+        self._transaction_depth = 0
+        if self.path != ":memory:":
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._migrate()
+
+    @contextmanager
+    def transaction(self, on_rollback=None):
+        """Serialize a service transition and commit all state changes together."""
+        with self._lock:
+            outer = self._transaction_depth == 0
+            if outer:
+                self._conn.execute("BEGIN IMMEDIATE")
+            self._transaction_depth += 1
+            try:
+                yield
+                if outer:
+                    self._conn.commit()
+            except BaseException:
+                if outer:
+                    try:
+                        if on_rollback is not None:
+                            on_rollback()
+                    finally:
+                        self._conn.rollback()
+                raise
+            finally:
+                self._transaction_depth -= 1
 
     def close(self) -> None:
         with self._lock:
@@ -41,7 +68,8 @@ class SQLiteStore:
     def _execute(self, sql: str, params: tuple = ()):
         with self._lock:
             cur = self._conn.execute(sql, params)
-            self._conn.commit()
+            if not self._transaction_depth:
+                self._conn.commit()
             return cur
 
     def _migrate(self) -> None:

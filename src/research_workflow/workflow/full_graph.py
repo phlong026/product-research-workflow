@@ -150,5 +150,5 @@ def _is_approved(response: Any) -> bool:
     if response is False or response is None:
         return False
     if isinstance(response, dict):
-        return bool(response.get("approved"))
+        return response.get("approved") is True
     return False
