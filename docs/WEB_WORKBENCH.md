@@ -64,6 +64,9 @@ uv pip install -e '.[dev,workflow,data,xlsx]' -p .venv
 | `resolve` | `{checkpoint_id, approve: bool, edits?:{ASIN:标签}, select?:[route_id...]}` —— **只能由用户明确点击触发,前端不得自动批准** |
 | `export-table` | `{table: 1\|2\|3}` → 生成 `exports/table{n}.csv`,经 exports 接口下载 |
 | `import-table` | `{table, upload: upload_id}` → 校验人工修改后的表;成功后旧审批失效并重新请求对应检查点(表1→data_review,表3→classification_review,表2→需重跑 classify);校验失败不改任何状态 |
+| `import-evidence` | `{kind: trends\|report-excerpts\|tiktok-units\|patents\|patent-search-log\|ads\|big-brand\|offsite\|cross-category, upload: upload_id, meta?: {key: value}}` → 登记外部证据(证据登记不是人工检查点,但文件哈希进入资料包 manifest);各 kind 必填的 meta 见 `skill/SKILL.md` |
+| `build-market-forecast` | `{horizon_years, scope?: top_sample, method?: cagr\|linear, granularity?: monthly\|annual, target_scope?, coverage_ratio?, coverage_source?, low_growth?, high_growth?}` → 预测(跨口径外推必须带有来源的覆盖率) |
+| `build-cross-channel` | `{geo?: global\|us, segment?: total\|countertop}` → Amazon+TikTok 事实整合(不含任何 Yes/No) |
 | `dossier` | `{}` → 服务端选择新版本目录 |
 
 ## 前端要求(红线)

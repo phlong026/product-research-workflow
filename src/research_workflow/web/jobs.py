@@ -28,7 +28,8 @@ MONTH = r"^\d{4}-\d{2}$"
 KEY = r"^[A-Za-z0-9_.:-]{1,64}$"
 ASIN = r"^[A-Za-z0-9]{1,20}$"
 COMMAND_TIMEOUTS = {"ingest": 3600, "discover-nodes": 900, "classify": 1800, "analyze": 900,
-                    "resolve": 300, "dossier": 600, "export-table": 120, "import-table": 300}
+                    "resolve": 300, "dossier": 600, "export-table": 120, "import-table": 300,
+                    "import-evidence": 300, "build-market-forecast": 300, "build-cross-channel": 300}
 
 
 class _Params(BaseModel):
@@ -85,6 +86,32 @@ class DossierParams(_Params):
     pass
 
 
+EVIDENCE_KINDS = "^(trends|report-excerpts|tiktok-units|patents|patent-search-log|ads|big-brand|offsite|cross-category)$"
+
+
+class ImportEvidenceParams(_Params):
+    kind: str = Field(pattern=EVIDENCE_KINDS)
+    upload: str = Field(min_length=1, max_length=64)
+    meta: dict[str, str] = Field(default_factory=dict, max_length=20)
+
+
+class MarketForecastParams(_Params):
+    horizon_years: int = Field(ge=1, le=10)
+    scope: str = Field(default="top_sample", pattern="^top_sample$")
+    method: str = Field(default="cagr", pattern="^(cagr|linear)$")
+    granularity: str = Field(default="monthly", pattern="^(monthly|annual)$")
+    target_scope: str | None = Field(default=None, pattern="^(amazon_channel|full_market)$")
+    coverage_ratio: float | None = Field(default=None, gt=0, le=1)
+    coverage_source: str | None = Field(default=None, min_length=1, max_length=300)
+    low_growth: float | None = Field(default=None, gt=-1, lt=10)
+    high_growth: float | None = Field(default=None, gt=-1, lt=10)
+
+
+class CrossChannelParams(_Params):
+    geo: str | None = Field(default=None, pattern="^(global|us)$")
+    segment: str | None = Field(default=None, pattern="^(total|countertop)$")
+
+
 class ExportTableParams(_Params):
     table: int = Field(ge=1, le=3)
 
@@ -98,6 +125,8 @@ PARAM_MODELS: dict[str, type[_Params]] = {
     "ingest": IngestParams, "discover-nodes": DiscoverParams, "classify": ClassifyParams,
     "resolve": ResolveParams, "analyze": AnalyzeParams, "dossier": DossierParams,
     "export-table": ExportTableParams, "import-table": ImportTableParams,
+    "import-evidence": ImportEvidenceParams, "build-market-forecast": MarketForecastParams,
+    "build-cross-channel": CrossChannelParams,
 }
 
 
@@ -126,6 +155,11 @@ def _check_key_value_params(parsed: _Params) -> None:
                 raise JobValidationError(f"{name} 键不合法: {key!r}")
             if not isinstance(value, str) or not value.strip() or len(value) > 500 or "\n" in value:
                 raise JobValidationError(f"{name}[{key}] 值不合法")
+    for key, value in (getattr(parsed, "meta", None) or {}).items():
+        if not re.fullmatch(r"^[a-z_]{1,32}$", key):
+            raise JobValidationError(f"meta 键不合法: {key!r}")
+        if not value.strip() or len(value) > 500 or "\n" in value or "\r" in value:
+            raise JobValidationError(f"meta[{key}] 值不合法")
     for route in getattr(parsed, "select", []) or []:
         if not re.fullmatch(r"^[A-Za-z0-9_:.-]{1,80}$", route):
             raise JobValidationError(f"路线 ID 不合法: {route!r}")
@@ -190,6 +224,19 @@ def build_argv(command: str, params: _Params, *, project_id: str, project_dir: P
         argv += [f"--pair={x}" for x in p["pairs"]] + [f"--period={x}" for x in p["periods"]]
     elif command == "dossier":
         argv.append(f"--output={next_dossier_dir(project_dir)}")
+    elif command == "import-evidence":
+        argv += [f"--kind={p['kind']}", f"--file={upload_path(p['upload'])}"]
+        argv += [f"--meta={k}={v}" for k, v in p["meta"].items()]
+    elif command == "build-market-forecast":
+        argv += [f"--horizon-years={p['horizon_years']}"]
+        for flag, key in (("scope", "scope"), ("method", "method"), ("granularity", "granularity"),
+                          ("target-scope", "target_scope"), ("coverage-ratio", "coverage_ratio"),
+                          ("coverage-source", "coverage_source"), ("low-growth", "low_growth"),
+                          ("high-growth", "high_growth")):
+            if p[key] is not None:
+                argv.append(f"--{flag}={p[key]}")
+    elif command == "build-cross-channel":
+        argv += [f"--{k}={p[k]}" for k in ("geo", "segment") if p[k]]
     elif command == "export-table":
         exports = project_dir / "exports"
         exports.mkdir(parents=True, exist_ok=True)
