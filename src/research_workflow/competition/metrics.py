@@ -6,6 +6,7 @@ from typing import Iterable
 
 from research_workflow.data.models import BSRRecord
 
+from .rank_matrix import DEFAULT_POINT_RANKS, build_point_rank_matrix, compare_point_rank_matrices
 from .models import (
     CompetitionMetricsResult,
     ConcentrationMetric,
@@ -45,6 +46,7 @@ def build_competition_metrics(
     head_cutoff: int = 10,
     broad_cutoff: int = 100,
     rank_bands: tuple[tuple[int, int, str], ...] = DEFAULT_RANK_BANDS,
+    point_ranks: tuple[int, ...] = DEFAULT_POINT_RANKS,
 ) -> CompetitionMetricsResult:
     grouped: dict[str, list[BSRRecord]] = defaultdict(list)
     for record in records:
@@ -195,9 +197,17 @@ def build_competition_metrics(
             )
         )
 
+    # Single-rank (point) matrix lives next to the cumulative layers above; the two
+    # bases are never mixed. Siphon-style comparison must use the point changes.
+    point_matrix = build_point_rank_matrix(
+        (record for rows in grouped.values() for record in rows), ranks=point_ranks
+    )
+
     return CompetitionMetricsResult(
         concentration=concentration,
         rank_layers=rank_layers,
         rank_bands=rank_band_metrics,
         head_suction=head_suction,
+        point_rank_matrix=point_matrix,
+        point_rank_changes=compare_point_rank_matrices(point_matrix),
     )
