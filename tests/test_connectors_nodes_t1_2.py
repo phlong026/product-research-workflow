@@ -93,3 +93,52 @@ def test_by_nodes_failure_propagates_instead_of_partial_result():
                 marketplace="US", keyword="kw", month="2026-03", node_id_paths_list=["N1", "N2"]
             )
         )
+
+
+class BigGateway:
+    """Result set of 250 rows, served 100 per page, sales-descending."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def list_tools(self, server_name):
+        return []
+
+    async def call_tool(self, server_name, tool_name, arguments=None):
+        params = (arguments or {})["params"]
+        self.calls.append(params)
+        start = (params["page"] - 1) * params["size"]
+        end = min(start + params["size"], 250)
+        items = [{"asin": f"A{i:04d}"} for i in range(start, end)]
+        return {"structured_content": {"items": items, "total": 250}}
+
+
+def test_limit_returns_top_prefix_and_counts_as_complete():
+    g = BigGateway()
+    resp = run(
+        SellerSpriteConnector(g).product_research(
+            marketplace="US", keyword="kw", month="2026-03", max_pages=2, limit=150
+        )
+    )
+    assert resp.data["count"] == 150
+    assert resp.data["items"][-1]["asin"] == "A0149"
+    assert len(g.calls) == 2
+
+
+def test_without_limit_incomplete_pagination_still_raises():
+    g = BigGateway()
+    with pytest.raises(ConnectorError, match="Incomplete pagination"):
+        run(
+            SellerSpriteConnector(g).product_research(
+                marketplace="US", keyword="kw", month="2026-03", max_pages=2
+            )
+        )
+
+
+def test_limit_must_be_positive():
+    with pytest.raises(ValueError):
+        run(
+            SellerSpriteConnector(BigGateway()).product_research(
+                marketplace="US", keyword="kw", limit=0
+            )
+        )

@@ -78,16 +78,24 @@ class SellerSpriteConnector:
         page_size: int = 100,
         max_pages: int = 20,
         extra: dict[str, Any] | None = None,
+        limit: int | None = None,
     ) -> ConnectorResponse:
         """Fetch product research rows using verified SellerSprite operation.
 
         SellerSprite currently caps size at 100 and overall results around 2000,
         therefore pagination remains explicit and bounded here.
+
+        ``limit`` requests only the top-``limit`` rows of the sales-descending
+        result: fetching stops (and counts as complete) once ``limit`` rows are
+        collected, and rows are truncated to ``limit``. Without it, the whole
+        result set must be fetched or the call raises.
         """
         if page_size < 1 or page_size > 100:
             raise ValueError("page_size must be between 1 and 100")
         if not 1 <= max_pages <= 20:
             raise ValueError("max_pages must be between 1 and 20")
+        if limit is not None and limit < 1:
+            raise ValueError("limit must be >= 1")
         if month:
             validate_month(month)
         rows: list[dict[str, Any]] = []
@@ -124,6 +132,10 @@ class SellerSpriteConnector:
                 if asin:
                     seen_asins.add(asin)
             rows.extend(page_rows)
+            if limit is not None and len(rows) >= limit:
+                rows = rows[:limit]
+                complete = True
+                break
             if total is not None and len(rows) >= total:
                 complete = True
                 break
@@ -149,6 +161,7 @@ class SellerSpriteConnector:
         page_size: int = 100,
         max_pages: int = 20,
         extra: dict[str, Any] | None = None,
+        limit: int | None = None,
     ) -> dict[str, ConnectorResponse]:
         """Fetch each node separately (node x month) so results are never mixed.
 
@@ -169,6 +182,7 @@ class SellerSpriteConnector:
                 page_size=page_size,
                 max_pages=max_pages,
                 extra=extra,
+                limit=limit,
             )
         return responses
 
