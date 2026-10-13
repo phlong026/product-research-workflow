@@ -24,6 +24,9 @@ class NodeDiscoveryResult:
     sample_asin_count: int
     rows_without_asin: int
     rows_without_node: int
+    # 节点计数基于销量降序的 Top 样本而非全量;sampled=True 表示关键词总量大于样本。
+    sampled: bool = False
+    sample_rows: int = 0  # 实际取得的样本行数(含无 ASIN/无节点行)
 
 
 @dataclass(slots=True, frozen=True)
@@ -46,3 +49,16 @@ class MonthlyFetchResult:
     raw_by_month: dict[str, Any]
     requests: dict[str, dict[str, Any]]  # request scope per requested month
     missing_months: dict[str, str] = field(default_factory=dict)  # month -> reason
+
+    def connector_error_months(self) -> list[str]:
+        """接口失败的月份(``connector_error:`` 前缀),按请求顺序。"""
+        return self._months_with_prefix("connector_error")
+
+    def empty_months(self) -> list[str]:
+        """接口成功但确实无数据的月份(``empty_response:`` 前缀),按请求顺序。"""
+        return self._months_with_prefix("empty_response")
+
+    def _months_with_prefix(self, prefix: str) -> list[str]:
+        return [
+            m for m in self.months if self.missing_months.get(m, "").startswith(f"{prefix}:")
+        ]

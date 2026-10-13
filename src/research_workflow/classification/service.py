@@ -69,14 +69,17 @@ class RuleClassificationProvider:
                 if any(word in text for word in words)
             ]
             label = matches[0] if len(matches) == 1 else schema.unknown_label
-            rows.append(
-                {
-                    "asin": profile.asin,
-                    "label": label,
-                    "confidence": "high" if len(matches) == 1 else "low",
-                    "rationale": "keyword rule" if len(matches) == 1 else "ambiguous or no match",
-                }
-            )
+            row = {
+                "asin": profile.asin,
+                "label": label,
+                "confidence": "high" if len(matches) == 1 else "low",
+                "rationale": "keyword rule" if len(matches) == 1 else "ambiguous or no match",
+            }
+            if len(matches) > 1:
+                # 多标签同时命中无法自动取舍 -> 待人工;零命中是显式的"未归类",不进待人工
+                row["needs_review"] = True
+                row["review_reason"] = f"多个标签同时命中: {','.join(sorted(matches))}"
+            rows.append(row)
         return rows
 
 
@@ -174,7 +177,8 @@ class ClassificationService:
             version=_version(schema, rows),
             rows=rows,
             approved=True,
-            human_edits=normalized_edits,
+            # 在此前的人工修改记录上合并本次 edits(同一 ASIN 以最新为准)
+            human_edits={**batch.human_edits, **normalized_edits},
         )
 
     def request_review_checkpoint(

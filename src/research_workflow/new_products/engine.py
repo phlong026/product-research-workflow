@@ -127,11 +127,18 @@ def analyze_new_products(
         )
 
         success_month = _find_success_month(sales_by_month, promotion_threshold, config.consecutive_months)
-        launch_success = success_month is not None
+        launch_success_status = _streak_status(
+            sales_by_month, promotion_threshold, config.consecutive_months
+        )
+        launch_success = launch_success_status == "yes"
         current_observed = bool(current_month and current_month in sales_by_month)
         current_sales = sales_by_month.get(current_month) if current_observed else None
         current_survival = (
-            bool(launch_success and current_sales is not None and current_sales >= survival_threshold)
+            (
+                None  # 成功与否未知(缺月)时,不能把存活判为 False
+                if launch_success_status == "unknown"
+                else bool(launch_success and current_sales is not None and current_sales >= survival_threshold)
+            )
             if current_observed
             else None
         )
@@ -165,10 +172,12 @@ def analyze_new_products(
                 early_window_complete=window_complete,
                 early_window_reached=window_reached,
                 retention_status=retention_status,
+                launch_success_status=launch_success_status,
             )
         )
 
     successful = [row for row in outcomes if row.launch_success]
+    success_unknown = [row for row in outcomes if row.launch_success_status == "unknown"]
     observed_successful = [row for row in successful if row.current_observed]
     surviving = [row for row in successful if row.current_survival is True]
     early = [
@@ -185,6 +194,8 @@ def analyze_new_products(
         total_products=len(outcomes),
         successful_products=len(successful),
         success_rate_pct=_pct(len(successful), len(outcomes)),
+        launch_success_unknown_products=len(success_unknown),
+        success_rate_upper_bound_pct=_pct(len(successful) + len(success_unknown), len(outcomes)),
         surviving_successful_products=len(surviving),
         survival_rate_among_successful_pct=(_pct(len(surviving), len(observed_successful)) if observed_successful else None),
         observed_successful_products=len(observed_successful),
@@ -203,7 +214,7 @@ def analyze_new_products(
         retention_denominator_note=(
             f"分母=全部有效新品({len(outcomes)});分子=连续满{config.consecutive_months}个月"
             f"(月销量>={retention_threshold})且研究当月({current_month})仍>={retention_threshold}。"
-            f"研究当月无观测但历史已满足连续条件的新品记为未知观测({len(retention_unknown)}个),"
+            f"研究当月无观测、或历史中间缺月导致无法判定连续条件的新品记为未知观测({len(retention_unknown)}个),"
             "不按0处理:下限不计入留存,上限全部计入留存。"
         ),
         early_window_complete_products=len(window_complete_rows),
@@ -290,6 +301,27 @@ def _ordinal_to_month(ordinal: int) -> str:
     return f"{ordinal // 12:04d}-{ordinal % 12 + 1:02d}"
 
 
+def _streak_status(sales_by_month: dict[str, int], threshold: int, consecutive_months: int) -> str:
+    """yes / no / unknown:是否存在连续 ``consecutive_months`` 个月 >= threshold。
+
+    缺月 = 未知(不当 0)。只有首个与最后一个观测月之间的"中间缺月"可能补足连续段:
+    yes = 仅凭已观测月份就满足;unknown = 已观测月份不满足,但把中间缺月当作达标即可满足;
+    no = 即使缺月全部达标也凑不齐(已被观测月份证伪)。
+    """
+    if _find_success_month(sales_by_month, threshold, consecutive_months) is not None:
+        return "yes"
+    ordinals = sorted(_month_ordinal(m) for m in sales_by_month)
+    observed = {_month_ordinal(m): v for m, v in sales_by_month.items()}
+    streak = 0
+    for ordinal in range(ordinals[0], ordinals[-1] + 1):
+        sales = observed.get(ordinal)
+        # 缺月(sales is None)乐观地视为达标;已观测且未达标则中断连续段
+        streak = streak + 1 if sales is None or sales >= threshold else 0
+        if streak >= consecutive_months:
+            return "unknown"
+    return "no"
+
+
 def _retention_status(
     sales_by_month: dict[str, int],
     current_month: str | None,
@@ -299,11 +331,17 @@ def _retention_status(
     """retained / not_retained / unknown.
 
     retained: a run of ``consecutive_months`` consecutive months >= threshold exists AND the
-    current month is observed and >= threshold. unknown: the run exists but the current month
-    has no observation (missing is never treated as 0).
+    current month is observed and >= threshold. unknown: the condition cannot be falsified by
+    observed months -- either the current month has no observation while the run exists/could
+    exist, or interior missing months could complete the run (missing is never treated as 0).
+    not_retained: falsified by observed months (no run possible even if gaps qualify, or the
+    observed current month is below threshold).
     """
-    if _find_success_month(sales_by_month, threshold, consecutive_months) is None:
+    streak = _streak_status(sales_by_month, threshold, consecutive_months)
+    if streak == "no":
         return "not_retained"
     if current_month is None or current_month not in sales_by_month:
         return "unknown"
-    return "retained" if sales_by_month[current_month] >= threshold else "not_retained"
+    if sales_by_month[current_month] < threshold:
+        return "not_retained"
+    return "retained" if streak == "yes" else "unknown"

@@ -5,12 +5,15 @@ The month window is computed elsewhere; this module only receives ``months``.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Iterable, Mapping
 
-from ..connectors.base import ConnectorError
+from ..connectors.base import ConnectorError, safe_exception_summary
 from ..data.bsr_pipeline import validate_month
 from .models import MonthlyFetchResult
 from .service import ProductResearchSource
+
+logger = logging.getLogger(__name__)
 
 # ``amz_unit`` is the verified order field of product_research; the other
 # aliases are inferred (字段名为推断,待真实 schema 验证).
@@ -99,10 +102,14 @@ async def fetch_monthly_top(
             )
         except ConnectorError as exc:
             missing[month] = f"connector_error: {exc}"
+            logger.warning(
+                "monthly fetch missing month %s (connector_error): %s", month, safe_exception_summary(exc)
+            )
             continue
         items = response.data.get("items", []) if isinstance(response.data, dict) else []
         if not items:
             missing[month] = "empty_response: no rows returned"
+            logger.warning("monthly fetch missing month %s (empty_response): no rows returned", month)
             continue
         rows_by_month[month] = _top_by_sales(items, top_n)
         raw_by_month[month] = response.raw

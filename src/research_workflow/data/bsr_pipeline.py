@@ -125,8 +125,6 @@ def _prefer(a: BSRRecord, b: BSRRecord) -> BSRRecord:
     """Choose the representative row: higher sales, then better rank, then ASIN."""
     a_rank = a.node_rank if a.node_rank is not None else 10**9
     b_rank = b.node_rank if b.node_rank is not None else 10**9
-    key_a = (a.monthly_sales, -a_rank, a.asin)
-    key_b = (b.monthly_sales, -b_rank, b.asin)
     return a if (-a.monthly_sales, a_rank, a.asin) <= (-b.monthly_sales, b_rank, b.asin) else b
 
 

@@ -8,11 +8,12 @@ sources are recorded as conflicts, never silently overwritten.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from typing import Any
 
-from research_workflow.connectors.base import with_retries
+from research_workflow.connectors.base import safe_exception_summary, with_retries
 
 from .adapters import profile_from_payload, split_region_and_account_type
 from .models import (
@@ -23,6 +24,8 @@ from .models import (
     EnrichmentReport,
 )
 from .service import ASINEnrichmentService
+
+logger = logging.getLogger(__name__)
 
 _MISSING_REGIONS = {"", "UNKNOWN"}
 
@@ -82,9 +85,14 @@ async def enrich_missing_regions(
                         lambda p=provider: p.get_product_detail(asin, marketplace),
                         attempts=attempts,
                         base_delay_seconds=base_delay_seconds,
+                        operation=f"region backfill {provider.name}",
                     )
                 except Exception as exc:  # noqa: BLE001 - recorded in report, never swallowed
                     errs.append(EnrichmentFailure(asin, provider.name, str(exc)))
+                    logger.warning(
+                        "region backfill failed asin=%s provider=%s: %s",
+                        asin, provider.name, safe_exception_summary(exc),
+                    )
                     continue
                 profile = profile_from_payload(payload, asin=asin, source=provider.name)
                 if profile is None:
@@ -111,6 +119,10 @@ async def enrich_missing_regions(
         filled += 1
         if len(set(regions.values())) > 1:
             conflicts.append(EnrichmentConflict(asin, "seller_region", dict(regions), chosen))
+            logger.warning(
+                "backfill conflict asin=%s field=seller_region sources=%s chosen=%s",
+                asin, sorted(regions), chosen,
+            )
 
     unknown_after = sum(1 for p in current.values() if p.seller_region in _MISSING_REGIONS)
     return EnrichmentReport(
@@ -191,9 +203,14 @@ async def enrich_bullets_unique_asins(
                         lambda p=provider: p.get_product_detail(asin, marketplace),
                         attempts=attempts,
                         base_delay_seconds=base_delay_seconds,
+                        operation=f"bullets backfill {provider.name}",
                     )
                 except Exception as exc:  # noqa: BLE001 - recorded in report, never swallowed
                     errs.append(EnrichmentFailure(asin, provider.name, str(exc)))
+                    logger.warning(
+                        "bullets backfill failed asin=%s provider=%s: %s",
+                        asin, provider.name, safe_exception_summary(exc),
+                    )
                     continue
                 profile = profile_from_payload(payload, asin=asin, source=provider.name)
                 if profile is not None and profile.bullets:
@@ -228,6 +245,10 @@ async def enrich_bullets_unique_asins(
                             chosen="existing",
                             month=month or None,
                         )
+                    )
+                    logger.warning(
+                        "backfill conflict asin=%s field=bullets month=%s chosen=existing",
+                        asin, month or "-",
                     )
             elif fetched:
                 row["bullets"] = list(fetched)

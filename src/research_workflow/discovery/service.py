@@ -8,6 +8,7 @@ needs one edit here.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Iterable, Mapping, Protocol
 
 from ..connectors.base import ConnectorResponse
@@ -107,16 +108,28 @@ async def discover_nodes(
     page_size: int = 100,
     max_pages: int = 5,
 ) -> NodeDiscoveryResult:
-    """Sample a keyword through the connector and rank candidate category nodes."""
+    """Sample a keyword through the connector and rank candidate category nodes.
+
+    只取销量降序的前 ``page_size * max_pages`` 行作样本(显式 ``limit``,不会因关键词
+    结果过多而分页不完整报错)。节点计数基于该 Top 样本而非全量;关键词总量大于样本时
+    结果的 ``sampled`` 为 True,调用方应提示"基于 Top 样本"。
+    """
+    limit = page_size * max_pages
     response = await connector.product_research(
         marketplace=marketplace,
         keyword=keyword,
         month=month,
         page_size=page_size,
         max_pages=max_pages,
+        limit=limit,
     )
-    items = response.data.get("items", []) if isinstance(response.data, dict) else []
-    return summarize_nodes(items)
+    data = response.data if isinstance(response.data, dict) else {}
+    items = data.get("items", [])
+    total = data.get("total")
+    # 供应商未回报总量时无法证伪"被截断",样本取满即保守视为抽样。
+    sampled = total > len(items) if isinstance(total, int) else len(items) >= limit
+    result = summarize_nodes(items)
+    return replace(result, sampled=sampled, sample_rows=len(items))
 
 
 def merge_nodes_by_asin(rows_by_node: Mapping[str, list[dict[str, Any]]]) -> MergedSample:

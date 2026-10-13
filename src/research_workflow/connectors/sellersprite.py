@@ -27,7 +27,9 @@ class SellerSpriteConnector:
         self.retry_attempts = retry_attempts
 
     async def validate(self) -> list[str]:
-        tools = await with_retries(lambda: self.gateway.list_tools(self.SERVER))
+        tools = await with_retries(
+            lambda: self.gateway.list_tools(self.SERVER), operation="sellersprite.list_tools"
+        )
         required = {self.SESSION, self.LIST_OPS, self.DESCRIBE, self.CALL}
         missing = sorted(required.difference(tools))
         if missing:
@@ -35,14 +37,16 @@ class SellerSpriteConnector:
         return tools
 
     async def session_status(self) -> Any:
-        return _structured(await with_retries(lambda: self.gateway.call_tool(self.SERVER, self.SESSION, {})))
+        return _structured(await with_retries(
+            lambda: self.gateway.call_tool(self.SERVER, self.SESSION, {}), operation="sellersprite.session_status"
+        ))
 
     async def login(self, wait_seconds: int = 180) -> Any:
         if not 0 <= wait_seconds <= 300:
             raise ValueError("wait_seconds must be between 0 and 300")
         return _structured(await with_retries(
             lambda: self.gateway.call_tool(self.SERVER, self.LOGIN, {"waitSeconds": int(wait_seconds)}),
-            attempts=1, timeout_seconds=wait_seconds + 30))
+            attempts=1, timeout_seconds=wait_seconds + 30, operation="sellersprite.login"))
 
     async def find_operations(self, query: str) -> Any:
         return await self.gateway.call_tool(self.SERVER, self.LIST_OPS, {"query": query})
@@ -60,7 +64,9 @@ class SellerSpriteConnector:
                 {"operation": operation, "params": params},
             )
 
-        raw = await with_retries(_call, attempts=self.retry_attempts)
+        raw = await with_retries(
+            _call, attempts=self.retry_attempts, operation=f"sellersprite.{operation}"
+        )
         return ConnectorResponse(
             provider=self.SERVER,
             operation=operation,
@@ -102,6 +108,7 @@ class SellerSpriteConnector:
         raw_pages: list[Any] = []
         complete = False
         previous_page = None
+        reported_total: int | None = None  # 供应商声明的结果总量(未返回则为 None)
         seen_asins: set[str] = set()
         for page in range(1, max_pages + 1):
             params: dict[str, Any] = {
@@ -122,6 +129,8 @@ class SellerSpriteConnector:
             response = await self.call_operation("product_research", params)
             raw_pages.append(response.data)
             page_rows, total = _extract_rows_and_total(response.data)
+            if total is not None:
+                reported_total = total
             if page_rows and page_rows == previous_page:
                 raise ConnectorError("Repeated pagination page; results are incomplete")
             previous_page = page_rows
@@ -147,7 +156,7 @@ class SellerSpriteConnector:
         return ConnectorResponse(
             provider=self.SERVER,
             operation="product_research",
-            data={"items": rows, "count": len(rows)},
+            data={"items": rows, "count": len(rows), "total": reported_total},
             raw=raw_pages,
         )
 

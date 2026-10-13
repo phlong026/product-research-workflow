@@ -97,6 +97,9 @@ class NewProductOutcome:
     # "retained" / "not_retained" / "unknown" (unknown = current month not observed
     # while the historical consecutive-run condition is already met)
     retention_status: str = "not_retained"
+    # "yes" / "no" / "unknown":中间缺月 = 未知(不当 0)。unknown = 已观测月份无法凑齐
+    # 连续达标段,但缺月若达标则可补足;launch_success 布尔字段在 unknown 时为 False(兼容旧口径)。
+    launch_success_status: str = "no"
 
 
 @dataclass(slots=True, frozen=True)
@@ -144,6 +147,10 @@ class NewProductSummary:
     retention_rate_pct: float = 0.0
     retention_rate_upper_bound_pct: float = 0.0
     retention_denominator_note: str = ""
+    # Launch success 三态:successful_products 为下限(仅 yes),unknown 为缺月无法判定的新品数,
+    # success_rate_upper_bound_pct = (yes + unknown) / total。
+    launch_success_unknown_products: int = 0
+    success_rate_upper_bound_pct: float = 0.0
     # Early window: denominator = valid new products whose whole early window is observed.
     early_window_complete_products: int = 0
     early_window_incomplete_products: int = 0
