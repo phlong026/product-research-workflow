@@ -2,7 +2,7 @@
  *
  * 安全约定:
  *  - 一切来自服务器/用户的文本只经 textContent / createTextNode 渲染,绝不拼接 HTML。
- *  - 三个人工检查点只在用户点击「确认」「驳回」时才提交 resolve 作业,前端不做任何自动批准。
+ *  - 各人工检查点只在用户点击「确认」「驳回」时才提交 resolve 作业,前端不做任何自动批准。
  *  - 不生成、不显示任何商业结论;最终决定由人工在资料包报告中填写。
  */
 (function () {
@@ -19,7 +19,7 @@
   const KEY_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
   const ROLE_NAMES = { owner: "所有者", editor: "编辑者", viewer: "只读", admin: "管理员", researcher: "研究员" };
   const COMMAND_NAMES = {
-    ingest: "数据导入", "discover-nodes": "节点发现", classify: "分类", analyze: "分析",
+    ingest: "数据导入", "discover-nodes": "节点发现", enrich: "商品补齐", classify: "分类", analyze: "分析",
     resolve: "检查点裁决", dossier: "生成资料包", "export-table": "导出表格", "import-table": "导入修改后的表",
   };
   const TABLE_NAMES = { 1: "表1 · 月度清洗数据", 2: "表2 · 唯一 ASIN 的地区/卖点", 3: "表3 · 分类结果" };
@@ -29,13 +29,15 @@
   const STEPS = [
     { key: "ingest", name: "数据导入", checkpoint: false },
     { key: "data_review", name: "数据检查点", checkpoint: true },
+    { key: "enrich", name: "商品补齐", checkpoint: false, optional: true },
+    { key: "enrichment_review", name: "补齐检查点", checkpoint: true, optional: true },
     { key: "classify", name: "分类", checkpoint: false },
     { key: "classification_review", name: "分类检查点", checkpoint: true },
     { key: "analyze", name: "分析", checkpoint: false },
     { key: "research_route_review", name: "路线检查点", checkpoint: true },
     { key: "dossier", name: "资料包", checkpoint: false },
   ];
-  const NEXT_INDEX = { ingest: 0, classify: 2, analyze: 4, dossier: 6, done: 7 };
+  const NEXT_INDEX = { ingest: 0, enrich: 2, classify: 4, analyze: 6, dossier: 8, done: 9 };
   const POLL_MS = 2000;
   const PAGE_SIZE = 50;
 
@@ -228,7 +230,7 @@
     }, field("用户名", user), field("口令", pass), msg, submit);
     mount(h("main", { class: "login-wrap" }, h("div", { class: "card login-card" },
       h("h1", null, "选品研究工作台"),
-      h("p", { class: "muted" }, "登录后创建研究项目、完成三个人工检查点并下载资料包。"), form)));
+      h("p", { class: "muted" }, "登录后创建研究项目、完成各人工检查点并下载资料包。"), form)));
     user.focus();
   }
 
@@ -383,11 +385,20 @@
   function renderAll() {
     const { detail, els } = wb;
     const current = currentIndex(detail);
+    const completed = new Set((detail.state && detail.state.completed_steps) || []);
+    const stateKey = { enrich: "enrich_asins" };
     els.stepper.replaceChildren(h("ol", { class: "stepper", "aria-label": "研究流程步骤" },
-      STEPS.map((step, i) => h("li", {
-        class: [i < current ? "done" : "", i === current ? "current" : "", step.checkpoint ? "checkpoint" : ""].join(" ").trim(),
-        "aria-current": i === current ? "step" : null,
-      }, h("span", { class: "num" }, "步骤 " + (i + 1)), h("span", { class: "name" }, step.name), h("span", { class: "kind" }, step.checkpoint ? "人工检查点" : "自动步骤")))));
+      STEPS.map((step, i) => {
+        // 可选步骤没有执行(状态里没有完成记录)就如实显示“已跳过”,不打勾
+        const skipped = Boolean(step.optional) && i < current && !completed.has(stateKey[step.key] || step.key);
+        return h("li", {
+          class: [i < current && !skipped ? "done" : "", skipped ? "skipped" : "", i === current ? "current" : "",
+            step.checkpoint ? "checkpoint" : ""].join(" ").trim(),
+          "aria-current": i === current ? "step" : null,
+        }, h("span", { class: "num" }, "步骤 " + (i + 1)), h("span", { class: "name" }, step.name),
+        h("span", { class: "kind" }, skipped ? "已跳过(可选)"
+          : (step.optional ? "可选" : "") + (step.checkpoint ? "人工检查点" : "自动步骤")));
+      })));
     renderMain();
     renderHistory();
     renderAside();
@@ -405,12 +416,18 @@
     if (cp) {
       const key = cp.step_key === "route_review" ? "research_route_review" : cp.step_key;
       if (key === "data_review") slot.append(dataReviewPanel(cp));
+      else if (key === "enrichment_review") slot.append(enrichmentReviewPanel(cp));
       else if (key === "classification_review") slot.append(classificationPanel(cp));
       else if (key === "research_route_review") slot.append(routePanel(cp));
       else slot.append(unknownCheckpointPanel(cp));
     } else if (detail.next === "ingest") {
       slot.append(canWrite ? ingestPanel() : readonlyStep("数据导入"));
+    } else if (detail.next === "enrich") {
+      slot.append(canWrite ? enrichPanel() : readonlyStep("商品补齐"));
+      const tables = tablesBlock([2]);
+      if (tables) slot.append(h("section", { class: "card" }, tables));
     } else if (detail.next === "classify") {
+      if (canWrite) slot.append(enrichPanel(true));
       slot.append(canWrite ? classifyPanel() : readonlyStep("分类"));
       const tables = tablesBlock([2]);
       if (tables) slot.append(h("section", { class: "card" }, tables));
@@ -863,7 +880,6 @@
     const dimension = h("input", { type: "text", value: "segment", maxlength: "64" });
     const providerRules = h("input", { type: "radio", name: "provider", value: "rules", checked: true });
     const providerLlm = h("input", { type: "radio", name: "provider", value: "llm" });
-    const enrich = h("input", { type: "checkbox" });
     const submit = button("开始分类", { kind: "primary", write: true, onclick: () => {
       try {
         const labels = Object.create(null); // 键可能是 __proto__ 等,用无原型对象避免污染
@@ -885,7 +901,7 @@
         }
         setNotice(msg, "", "");
         startJob("classify", { labels, rules, dimension: dimension.value.trim() || "segment",
-          provider: providerLlm.checked ? "llm" : "rules", enrich: enrich.checked });
+          provider: providerLlm.checked ? "llm" : "rules" });
       } catch (err) {
         setNotice(msg, "danger", err.message);
       }
@@ -897,9 +913,33 @@
       h("div", { class: "grid" }, field("分类维度", dimension)),
       h("fieldset", null, h("legend", null, "分类方式"),
         h("div", { class: "inline" }, h("label", null, providerRules, "规则关键词"), h("label", null, providerLlm, "LLM 辅助"))),
-      h("div", { class: "field" }, h("label", { class: "inline" }, enrich, "补齐卖家地区与卖点(ASIN 补齐)"),
-        h("span", { class: "hint" }, "需要 MCP 会话;补齐结果存在冲突或失败时会在检查点中醒目展示,不会静默覆盖。")),
+      h("p", { class: "muted" }, "卖家地区与卖点的补齐是独立的可选步骤:需要时先在上方运行「商品补齐」并确认补齐检查点,分类会采用已确认的补齐结果。"),
       msg, submit);
+  }
+
+  // ---------------------------------------------------------------- 商品补齐(可选)与补齐检查点
+
+  function enrichPanel(optional) {
+    const msg = h("div");
+    return h("section", { class: "card", "aria-labelledby": "enrich-title" },
+      h("h2", { id: "enrich-title" }, optional ? "商品补齐(可选)" : "商品补齐"),
+      h("p", { class: "muted" }, "补齐缺失的卖家所属地与卖点(表2)。需要 MCP 会话;补齐结果存在冲突或失败时会在补齐检查点中醒目展示,不会静默覆盖,你确认之前不会进入分类。"),
+      h("div", { class: "row-actions" }, button("运行商品补齐", { kind: optional ? null : "primary", write: true, onclick: () => startJob("enrich", {}) })),
+      msg);
+  }
+
+  function enrichmentReviewPanel(cp) {
+    const p = cp.payload || {};
+    const note = p.human_table2_edits
+      ? notice("info", "包含人工修改的表2",
+        "人工校正的地区与卖点优先于机器补齐" + (p.table_edit ? "(本次修改 " + p.table_edit.changed_cells + " 个单元格)" : "") + ";请复核后再确认。")
+      : null;
+    const machine = p.summary
+      ? enrichmentBlock({ summary: p.summary, conflicts: p.conflicts, failures: p.failures })
+      : h("p", { class: "muted" }, "没有机器补齐结果,只有人工修改的表2。");
+    return h("section", { class: "card", "aria-labelledby": "er-title" },
+      checkpointHeader(cp, "补齐检查点(表2)", "er-title"),
+      note, machine, tablesBlock([2]), resolveButtons(cp));
   }
 
   // ---------------------------------------------------------------- 步骤 5:分析
@@ -1240,7 +1280,7 @@
       : null;
     return h("section", { class: "card", "aria-labelledby": "dossier-title" },
       h("h2", { id: "dossier-title" }, "步骤 7 · 资料包"),
-      done ? notice("ok", "三个检查点均已由你确认", "可下载资料包,也可生成新版本。") : null,
+      done ? notice("ok", "各检查点均已由你确认", "可下载资料包,也可生成新版本。") : null,
       h("p", { class: "disclaimer" }, "最终商业决定由人工在报告第 8 节填写,系统不代填。"),
       h("h3", null, "已生成的版本"), listBox, generate);
   }

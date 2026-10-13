@@ -274,7 +274,7 @@ def retention_rows(dossier: ResearchDossierInput) -> list[tuple[str, float | int
         ("当期存活率", s.survival_rate_among_successful_pct, "pct",
          f"分母=当期已观测的成功新品({s.observed_successful_products});当期未观测 {s.unknown_successful_products} 个不计入"),
         ("原文口径留存率(下限)", s.retention_rate_pct, "pct",
-         f"分母=全部有效新品({s.retention_denominator_products});分子=连续达标且当期仍达标({s.retained_products});未知不计入分子"),
+         f"分母=全部有效新品({s.retention_denominator_products});分子=当期仍达标({s.retained_products},不要求历史连续达标);未知不计入分子"),
         ("原文口径留存率(上限)", s.retention_rate_upper_bound_pct, "pct",
          f"同分母;未知 {s.retention_unknown_products} 个按留存计入分子"),
         ("留存率口径说明", s.retention_denominator_note, "text", "来自新品分析模块"),

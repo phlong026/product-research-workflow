@@ -146,7 +146,9 @@ def test_table2_region_edit_on_known_region_reaches_metrics_and_is_idempotent(ap
         if row["asin"] == "A1":
             row["seller_region"] = "US"  # 原为 CN(已知地区)
     edited = _write(tmp_path / "t2e.csv", rows)
-    assert run(tmp_path, capsys, "import-table", "--project", pid, "--table", "2", "--file", edited)["changed_cells"] >= 1
+    imported = run(tmp_path, capsys, "import-table", "--project", pid, "--table", "2", "--file", edited)
+    assert imported["changed_cells"] >= 1 and imported["checkpoint_step"] == "enrichment_review"
+    run(tmp_path, capsys, "resolve", "--project", pid, "--checkpoint", imported["checkpoint_id"], "--approve")
     cls = run(tmp_path, capsys, "classify", "--project", pid, "--label", "n=N", "--rule", "n=nugget")
     run(tmp_path, capsys, "resolve", "--project", pid, "--checkpoint", cls["checkpoint_id"], "--approve")
     run(tmp_path, capsys, "analyze", "--project", pid)
@@ -242,15 +244,19 @@ def test_llm_total_failure_fails_the_command(approved, tmp_path, capsys, monkeyp
     assert "LLM" in err["error"] and "失败" in err["error"]
 
 
-def test_llm_config_is_validated_before_enrichment(approved, tmp_path, capsys, monkeypatch) -> None:
+def test_classify_enrich_flag_is_retired_and_never_runs_enrichment(approved, tmp_path, capsys, monkeypatch) -> None:
     import scripts.run_research as rr
 
     calls = []
     monkeypatch.setattr(rr, "_run_enrichment", lambda *a, **k: calls.append(1))
+    err = run(tmp_path, capsys, "classify", "--project", approved, "--enrich", "--label", "n=N", fail=True)
+    assert "enrich" in err["error"] and calls == []
+
+
+def test_llm_config_is_validated_before_classification(approved, tmp_path, capsys, monkeypatch) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    err = run(tmp_path, capsys, "classify", "--project", approved, "--provider", "llm", "--enrich", "--label", "n=N",
-              fail=True)
-    assert "ANTHROPIC_API_KEY" in err["error"] and calls == []
+    err = run(tmp_path, capsys, "classify", "--project", approved, "--provider", "llm", "--label", "n=N", fail=True)
+    assert "ANTHROPIC_API_KEY" in err["error"]
 
 
 # --- H5:新品分析只统计通过新品队列的 ASIN ---

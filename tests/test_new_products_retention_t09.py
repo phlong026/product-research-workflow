@@ -41,15 +41,15 @@ def test_retention_rate_hand_calculated_with_unknown_disclosed():
         "P1": "retained",
         "P2": "not_retained",  # historical success but current month failed
         "P3": "unknown",  # current month missing: not treated as 0
-        "P4": "not_retained",  # fewer than 3 months
+        "P4": "retained",  # 已确认口径:不要求历史连续达标,只看当期(仅 2 个月也算)
         "P5": "not_retained",
     }
     # denominator = all 5 valid new products
     assert s.retention_denominator_products == 5
-    assert s.retained_products == 1
+    assert s.retained_products == 2  # P1、P4
     assert s.retention_unknown_products == 1
-    assert math.isclose(s.retention_rate_pct, 20.0)  # 1/5 lower bound
-    assert math.isclose(s.retention_rate_upper_bound_pct, 40.0)  # (1+1)/5
+    assert math.isclose(s.retention_rate_pct, 40.0)  # 2/5 lower bound
+    assert math.isclose(s.retention_rate_upper_bound_pct, 60.0)  # (2+1)/5
     assert "全部有效新品" in s.retention_denominator_note
     assert "未知" in s.retention_denominator_note
     # launch success (3/5) and legacy survival among observed successful (1/2) stay separate
@@ -172,11 +172,11 @@ def test_interior_gap_that_could_complete_streak_is_unknown():
     assert outcome.launch_success_status == "unknown"
     assert outcome.launch_success is False  # 旧布尔字段保持兼容(未知不当作成功)
     assert outcome.success_month is None
-    assert outcome.retention_status == "unknown"
+    assert outcome.retention_status == "retained"  # 留存只看当期(04=300),与历史缺月无关
     assert outcome.current_survival is None  # 成功与否未知,不能判存活为 False
-    assert summary.retained_products == 0
-    assert summary.retention_unknown_products == 1
-    assert math.isclose(summary.retention_rate_pct, 0.0)
+    assert summary.retained_products == 1
+    assert summary.retention_unknown_products == 0
+    assert math.isclose(summary.retention_rate_pct, 100.0)
     assert math.isclose(summary.retention_rate_upper_bound_pct, 100.0)
     assert summary.successful_products == 0
     assert summary.launch_success_unknown_products == 1
@@ -188,10 +188,10 @@ def test_interior_gap_that_cannot_complete_streak_is_definitively_no():
     outcome, summary = _analyze_one({1: 300, 3: 100, 4: 300})
     assert outcome.launch_success_status == "no"
     assert outcome.launch_success is False
-    assert outcome.retention_status == "not_retained"
+    assert outcome.retention_status == "retained"  # 当期 04=300 达标;从未连续达标不影响留存
     assert summary.launch_success_unknown_products == 0
     assert summary.retention_unknown_products == 0
-    assert math.isclose(summary.retention_rate_upper_bound_pct, 0.0)
+    assert math.isclose(summary.retention_rate_upper_bound_pct, 100.0)
 
 
 def test_observed_streak_across_gap_is_yes_and_unchanged():
@@ -207,3 +207,17 @@ def test_observed_current_month_below_threshold_falsifies_retention_despite_gap(
     # 研究当月已观测且未达标:即使历史有缺月,留存也可被证伪
     outcome, _ = _analyze_one({1: 300, 3: 300, 4: 100})
     assert outcome.retention_status == "not_retained"
+
+
+def test_retention_numerator_does_not_require_historical_launch_success():
+    """已确认口径:留存只看当期是否达标,不要求历史连续达标。"""
+    rows = series("LATE", 6, [300])  # 只出现一个月:从未连续达标
+    rows += series("ZIGZAG", 3, [300, 10, 300, 300])  # 中间断档,当期达标
+    rows += series("LOW", 3, [300, 300, 300, 10])  # 曾连续达标,当期不达标
+    result = analyze_new_products(rows, NewProductConfig(study_month="2026-06"))
+    by = {o.asin: o for o in result.outcomes}
+    assert by["LATE"].launch_success is False and by["LATE"].retention_status == "retained"
+    assert by["ZIGZAG"].launch_success is False and by["ZIGZAG"].retention_status == "retained"
+    assert by["LOW"].launch_success is True and by["LOW"].retention_status == "not_retained"
+    assert result.summary.retained_products == 2
+    assert math.isclose(result.summary.retention_rate_pct, 200 / 3)

@@ -219,3 +219,6 @@ tr.edited td { background: var(--accent-soft); }
 .table-io-row .field { margin: 8px 0 0; }
 .member-list { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 6px; }
 .member-list li { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+.stepper li.skipped { opacity: .6; }
+.stepper li.skipped .name { text-decoration: line-through; }

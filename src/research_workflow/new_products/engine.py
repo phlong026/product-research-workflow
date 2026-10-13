@@ -149,9 +149,7 @@ def analyze_new_products(
             first_threshold_index is not None
             and 1 <= first_threshold_index <= config.early_threshold_window_months
         )
-        retention_status = _retention_status(
-            sales_by_month, current_month, retention_threshold, config.consecutive_months
-        )
+        retention_status = _retention_status(sales_by_month, current_month, retention_threshold)
         latest = rows[-1]
         outcomes.append(
             NewProductOutcome(
@@ -212,9 +210,9 @@ def analyze_new_products(
         retention_rate_pct=_pct(len(retained), len(outcomes)),
         retention_rate_upper_bound_pct=_pct(len(retained) + len(retention_unknown), len(outcomes)),
         retention_denominator_note=(
-            f"分母=全部有效新品({len(outcomes)});分子=连续满{config.consecutive_months}个月"
-            f"(月销量>={retention_threshold})且研究当月({current_month})仍>={retention_threshold}。"
-            f"研究当月无观测、或历史中间缺月导致无法判定连续条件的新品记为未知观测({len(retention_unknown)}个),"
+            f"分母=全部有效新品({len(outcomes)});分子=研究当月({current_month})月销量>={retention_threshold}"
+            "的新品(不要求历史连续达标,已确认口径)。"
+            f"研究当月无观测的新品记为未知观测({len(retention_unknown)}个),"
             "不按0处理:下限不计入留存,上限全部计入留存。"
         ),
         early_window_complete_products=len(window_complete_rows),
@@ -326,22 +324,14 @@ def _retention_status(
     sales_by_month: dict[str, int],
     current_month: str | None,
     threshold: int,
-    consecutive_months: int,
 ) -> str:
     """retained / not_retained / unknown.
 
-    retained: a run of ``consecutive_months`` consecutive months >= threshold exists AND the
-    current month is observed and >= threshold. unknown: the condition cannot be falsified by
-    observed months -- either the current month has no observation while the run exists/could
-    exist, or interior missing months could complete the run (missing is never treated as 0).
-    not_retained: falsified by observed months (no run possible even if gaps qualify, or the
-    observed current month is below threshold).
+    业务已确认口径:留存只看研究当月是否仍达标,**不要求历史连续达标**
+    (与 launch_success 的“连续 N 月达标”相互独立)。
+    retained: 研究当月已观测且 >= threshold。not_retained: 研究当月已观测且 < threshold。
+    unknown: 研究当月无观测(缺失从不当作 0)。
     """
-    streak = _streak_status(sales_by_month, threshold, consecutive_months)
-    if streak == "no":
-        return "not_retained"
     if current_month is None or current_month not in sales_by_month:
         return "unknown"
-    if sales_by_month[current_month] < threshold:
-        return "not_retained"
-    return "retained" if streak == "yes" else "unknown"
+    return "retained" if sales_by_month[current_month] >= threshold else "not_retained"

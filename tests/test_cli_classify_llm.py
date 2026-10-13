@@ -85,7 +85,16 @@ def _prepare(tmp_path, capsys):
 
 def test_llm_classify_with_enrichment_blocks_approval_until_review_resolved(env, tmp_path, capsys) -> None:
     pid = _prepare(tmp_path, capsys)
-    out = _run(tmp_path, capsys, "classify", "--project", pid, "--provider", "llm", "--enrich",
+    # 补齐是独立步骤,须先经补齐检查点人工确认才能分类
+    enr = _run(tmp_path, capsys, "enrich", "--project", pid)
+    assert enr["checkpoint_step"] == "enrichment_review"
+    assert enr["enrichment"]["unknown_region_before"] == 1 and enr["enrichment"]["unknown_region_after"] == 0
+    with pytest.raises(SystemExit):  # 补齐未确认:不能分类
+        _run(tmp_path, capsys, "classify", "--project", pid, "--provider", "llm",
+             "--label", "nugget=Nugget", "--label", "bullet=Bullet")
+    _run(tmp_path, capsys, "resolve", "--project", pid, "--checkpoint", enr["checkpoint_id"], "--approve")
+
+    out = _run(tmp_path, capsys, "classify", "--project", pid, "--provider", "llm",
                "--label", "nugget=Nugget", "--label", "bullet=Bullet")
     assert out["classification_provider"] == "llm"
     assert out["enrichment"]["unknown_region_before"] == 1 and out["enrichment"]["unknown_region_after"] == 0
@@ -110,6 +119,47 @@ def test_llm_classify_with_enrichment_blocks_approval_until_review_resolved(env,
     ctx = json.loads((pdir / "analysis_context.json").read_text(encoding="utf-8"))
     assert ctx["classification_provider"] == "llm" and ctx["enrichment"] == "done"
     assert '"UNKNOWN"' not in (pdir / "market_metrics.json").read_text(encoding="utf-8")
+
+
+def test_classify_enrich_flag_is_retired_in_favour_of_enrich_command(env, tmp_path, capsys) -> None:
+    pid = _prepare(tmp_path, capsys)
+    with pytest.raises(SystemExit):
+        _run(tmp_path, capsys, "classify", "--project", pid, "--enrich", "--label", "nugget=Nugget")
+    assert env.detail_calls == []  # 没有悄悄做补齐
+
+
+def test_enrichment_review_gates_downstream_and_reject_points_back_to_enrich(env, tmp_path, capsys) -> None:
+    pid = _prepare(tmp_path, capsys)
+    enr = _run(tmp_path, capsys, "enrich", "--project", pid)
+    status = _run(tmp_path, capsys, "status", "--project", pid)
+    assert status["pending_checkpoint"]["step_key"] == "enrichment_review"
+    assert status["pending_checkpoint"]["payload"]["summary"]["regions_filled"] >= 1
+    rej = _run(tmp_path, capsys, "resolve", "--project", pid, "--checkpoint", enr["checkpoint_id"], "--reject")
+    assert rej["next"] == "enrich"
+    assert _run(tmp_path, capsys, "status", "--project", pid)["next"] == "enrich"
+    with pytest.raises(SystemExit):
+        _run(tmp_path, capsys, "classify", "--project", pid, "--label", "nugget=Nugget", "--rule", "nugget=nugget")
+    # 重新补齐 → 新检查点 → 确认后才能分类
+    enr2 = _run(tmp_path, capsys, "enrich", "--project", pid)
+    assert enr2["checkpoint_id"] != enr["checkpoint_id"]
+    assert _run(tmp_path, capsys, "resolve", "--project", pid, "--checkpoint", enr2["checkpoint_id"],
+                "--approve")["next"] == "classify"
+    out = _run(tmp_path, capsys, "classify", "--project", pid, "--label", "nugget=Nugget", "--rule", "nugget=nugget")
+    assert out["enrichment"]["regions_filled"] >= 1
+
+
+def test_re_enrich_after_classification_invalidates_approvals_and_downstream(env, tmp_path, capsys) -> None:
+    pid = _prepare(tmp_path, capsys)
+    enr = _run(tmp_path, capsys, "enrich", "--project", pid)
+    _run(tmp_path, capsys, "resolve", "--project", pid, "--checkpoint", enr["checkpoint_id"], "--approve")
+    cls = _run(tmp_path, capsys, "classify", "--project", pid, "--label", "nugget=Nugget", "--rule", "nugget=nugget")
+    _run(tmp_path, capsys, "resolve", "--project", pid, "--checkpoint", cls["checkpoint_id"], "--approve",
+         "--edit", "E3=nugget", "--edit", "E2=nugget")
+    _run(tmp_path, capsys, "enrich", "--project", pid)  # 重新补齐:旧确认与分类全部作废
+    pdir = tmp_path / "projects" / pid
+    assert not (pdir / "classification.json").exists()
+    with pytest.raises(SystemExit):
+        _run(tmp_path, capsys, "analyze", "--project", pid)
 
 
 def test_default_rules_provider_unchanged_and_enrichment_skipped(env, tmp_path, capsys) -> None:

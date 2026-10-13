@@ -52,6 +52,7 @@ from research_workflow.data import (
 )
 from research_workflow.discovery import discover_nodes, fetch_monthly_top, merge_nodes_by_asin
 from research_workflow.data.io import read_tabular_rows, write_csv_rows
+from research_workflow.reconcile import flatten_metrics, reconcile, summarize, to_dicts
 from research_workflow.data.models import BSRRecord, MonthlyBSRResult
 from research_workflow.data.bsr_pipeline import normalize_seller_region, validate_month, _to_int
 from research_workflow.connectors.base import ConnectorError
@@ -238,8 +239,9 @@ def _build_llm_complete():
     model = os.environ.get("RESEARCH_LLM_MODEL", "claude-sonnet-5-5")
 
     async def complete(prompt: str) -> str:
+        # 不传 temperature/top_p/top_k:Sonnet 5/5.5、Opus 5.x 等当前模型拒绝非默认采样参数(400)。
         message = await client.messages.create(
-            model=model, max_tokens=8192, temperature=0,
+            model=model, max_tokens=8192,
             messages=[{"role": "user", "content": prompt}],
         )
         return "".join(block.text for block in message.content if getattr(block, "type", "") == "text")
@@ -294,11 +296,11 @@ def _parse_kv(items: list[str], what: str) -> dict[str, str]:
     return parsed
 
 
-STAGES = ["collect_bsr", "data_review", "enrich_asins", "classify", "classification_review",
+STAGES = ["collect_bsr", "data_review", "enrich_asins", "enrichment_review", "classify", "classification_review",
           "apply_classification_review", "market_metrics", "market_analysis", "competition_metrics",
           "new_product_analysis", "research_route", "route_review", "research_route_review",
           "apply_route_review", "dossier"]
-DERIVED_FILES = {"collect_bsr": ["table2_edits.json", "coverage.json", "table_edits.json"], "classify": ["classification.json", "enrichment.json"], "market_metrics": ["market_metrics.json",
+DERIVED_FILES = {"collect_bsr": ["table2_edits.json", "coverage.json", "table_edits.json"], "enrich_asins": ["enrichment.json"], "classify": ["classification.json"], "market_metrics": ["market_metrics.json",
                  "market_analysis.json", "competition.json", "new_products.json", "route_plan.json",
                  "analysis_context.json", "new_product_queue.json", "iteration.json"]}
 
@@ -654,6 +656,45 @@ def cmd_login(args: argparse.Namespace) -> None:
            "next": "ingest --live" if result.get("ready") is True else "请在本机浏览器完成登录后重新检查"})
 
 
+def _needs_enrichment_review(pdir: Path) -> bool:
+    """已有机器补齐或人工表2 修改时,下游必须先通过“补齐检查点”(表2 人工确认)。"""
+    return (pdir / "enrichment.json").is_file() or (pdir / "table2_edits.json").is_file()
+
+
+def _gate_steps(pdir: Path, steps: list[str]) -> list[str]:
+    if _needs_enrichment_review(pdir) and "enrichment_review" not in steps:
+        index = steps.index("data_review") + 1 if "data_review" in steps else 0
+        return [*steps[:index], "enrichment_review", *steps[index:]]
+    return steps
+
+
+def _base_profiles(records: list[BSRRecord]) -> dict[str, ASINProfile]:
+    profiles: dict[str, ASINProfile] = {}
+    for record in records:
+        profiles.setdefault(
+            record.asin,
+            ASINProfile(
+                asin=record.asin,
+                title=record.title,
+                brand=record.brand,
+                seller_region=record.seller_region or "UNKNOWN",
+                launch_date=record.launch_date,
+                image_url=record.image_url,
+            ),
+        )
+    return profiles
+
+
+def _apply_enrichment(profiles: dict[str, ASINProfile], enrichment: dict[str, Any]) -> None:
+    """把已落盘(且已人工确认)的机器补齐叠加到画像上;只填补,冲突/失败仍在审阅记录里。"""
+    for asin, region in (enrichment.get("regions") or {}).items():
+        if asin in profiles:
+            profiles[asin].seller_region = region
+    for asin, bullets in (enrichment.get("bullets") or {}).items():
+        if asin in profiles:
+            profiles[asin].bullets = list(bullets)
+
+
 def _run_enrichment(args: argparse.Namespace, project, records: list[BSRRecord],
                     profiles: dict[str, ASINProfile]) -> dict[str, Any]:
     """地区(T1-6)与卖点(T1-7)补齐:各只取需要的 ASIN,冲突/失败进入审阅,不静默覆盖。"""
@@ -690,30 +731,50 @@ def _run_enrichment(args: argparse.Namespace, project, records: list[BSRRecord],
     }
 
 
-def cmd_classify(args: argparse.Namespace) -> None:
+def cmd_enrich(args: argparse.Namespace) -> None:
+    """独立的商品补齐步骤(表2:卖家所属地、卖点):补齐后必须经“补齐检查点”人工确认才能分类。"""
     svc = _service(args)
     project = svc.store.get_project(args.project)
     if project is None:
         raise KeyError(f"Unknown project: {args.project}")
     pdir = _project_dir(args, args.project)
     _require_approved(svc, args.project, pdir, ["data_review"])
+    records = _load_records(pdir, overlay=False)
+    profiles = _base_profiles(records)
+    enrichment = _run_enrichment(args, project, records, profiles)
+
+    _invalidate(svc, args.project, pdir, "enrich_asins")  # 旧补齐、旧确认与下游分类全部作废
+    _save_json(pdir / "enrichment.json", enrichment)
+    svc.set_step(args.project, "enrich_asins", StepStatus.COMPLETED, output_ref="enrichment.json")
+    table2 = _table2_edits(pdir)
+    checkpoint = svc.request_human_checkpoint(
+        args.project, "enrichment_review",
+        "请检查商品补齐结果(表2:卖家所属地、卖点):覆盖情况、冲突与失败必须逐项核对。可 export-table --table 2 导出修改后 import-table 回传;确认后才能分类。",
+        {"summary": enrichment["summary"], "conflicts": enrichment["conflicts"], "failures": enrichment["failures"],
+         "human_table2_edits": bool(table2),
+         "artifact_hashes": _hashes(pdir, ["enrichment.json"] + (["table2_edits.json"] if table2 else []))})
+    _emit({"project_id": args.project, "enrichment": enrichment["summary"],
+           "enrichment_conflicts": len(enrichment["conflicts"]), "enrichment_failures": len(enrichment["failures"]),
+           "checkpoint_id": checkpoint.id, "checkpoint_step": "enrichment_review",
+           "next": "resolve --approve 人工确认补齐结果后再 classify(冲突/失败不会被静默覆盖)"})
+
+
+def cmd_classify(args: argparse.Namespace) -> None:
+    svc = _service(args)
+    project = svc.store.get_project(args.project)
+    if project is None:
+        raise KeyError(f"Unknown project: {args.project}")
+    pdir = _project_dir(args, args.project)
+    if args.enrich:
+        raise ValueError("补齐已拆为独立步骤:先运行 enrich 并在补齐检查点人工确认,再 classify(不再支持 classify --enrich)")
+    _require_approved(svc, args.project, pdir, _gate_steps(pdir, ["data_review"]))
     records = _load_records(pdir, overlay=False)  # 用原始记录重算,避免叠加旧的补齐结果
 
-    profiles: dict[str, ASINProfile] = {}
-    for record in records:
-        profiles.setdefault(
-            record.asin,
-            ASINProfile(
-                asin=record.asin,
-                title=record.title,
-                brand=record.brand,
-                seller_region=record.seller_region or "UNKNOWN",
-                launch_date=record.launch_date,
-                image_url=record.image_url,
-            ),
-        )
-    llm_complete = _build_llm_complete() if args.provider == "llm" else None  # 先校验 LLM 配置,避免补齐跑完才失败
-    enrichment = _run_enrichment(args, project, records, profiles) if args.enrich else None
+    profiles = _base_profiles(records)
+    llm_complete = _build_llm_complete() if args.provider == "llm" else None  # 先校验 LLM 配置,避免分类跑完才失败
+    enrichment = _load_json(pdir / "enrichment.json") if (pdir / "enrichment.json").is_file() else None
+    if enrichment is not None:
+        _apply_enrichment(profiles, enrichment)  # 已人工确认的机器补齐
     table2 = _table2_edits(pdir)  # 人工校正的表2 优先于机器补齐
     for asin, bullets in table2.get("bullets", {}).items():
         if asin in profiles:
@@ -743,10 +804,11 @@ def cmd_classify(args: argparse.Namespace) -> None:
             raise ValueError(f"LLM 分类调用全部失败({len(failed)} 个 ASIN),未保存任何结果;"
                              f"请检查 API 密钥/模型名/网络。原因示例: {failed[0].review_reason[:200]}")
 
-    _invalidate(svc, args.project, pdir, "enrich_asins")
-    if enrichment is not None:
-        _save_json(pdir / "enrichment.json", enrichment)
-    svc.set_step(args.project, "enrich_asins", StepStatus.COMPLETED if enrichment else StepStatus.SKIPPED)
+    if _needs_enrichment_review(pdir):
+        _invalidate(svc, args.project, pdir, "classify")  # 补齐结果与其人工确认保持有效,只重做分类
+    else:
+        _invalidate(svc, args.project, pdir, "enrich_asins")
+        svc.set_step(args.project, "enrich_asins", StepStatus.SKIPPED)
     _save_json(pdir / "classification.json", {"schema": schema.canonical_payload(), "batch": batch.to_dict(),
                                               "provider": provider.name})
     svc.set_step(args.project, "classify", StepStatus.COMPLETED, output_ref="classification.json")
@@ -803,6 +865,8 @@ def status_payload(svc: WorkflowService, root: str | Path, project_id: str) -> d
         next_action = "resolve"
     elif "data_review" not in completed:
         next_action = "ingest"
+    elif _needs_enrichment_review(pdir) and "enrichment_review" not in completed:
+        next_action = "enrich"  # 补齐结果尚未人工确认(被驳回或被作废):重新补齐,或 import-table 回传表2
     elif "classification_review" not in completed:
         next_action = "classify"
     elif "research_route_review" not in completed:
@@ -872,12 +936,13 @@ def cmd_resolve(args: argparse.Namespace) -> None:
 
     next_action = {
         "data_review": "classify",
+        "enrichment_review": "classify",
         "classification_review": "analyze",
         "route_review": "dossier",
         "research_route_review": "dossier",
     }.get(checkpoint.step_key, "status")
     if not args.approve:
-        next_action = {"data_review": "ingest", "classification_review": "classify"}.get(checkpoint.step_key, "analyze")
+        next_action = {"data_review": "ingest", "enrichment_review": "enrich", "classification_review": "classify"}.get(checkpoint.step_key, "analyze")
     _emit(
         {
             "project_id": args.project,
@@ -896,7 +961,7 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     if svc.store.get_project(args.project) is None:
         raise KeyError(f"Unknown project: {args.project}")
     pdir = _project_dir(args, args.project)
-    _require_approved(svc, args.project, pdir, ["data_review", "classification_review"])
+    _require_approved(svc, args.project, pdir, _gate_steps(pdir, ["data_review", "classification_review"]))
     envelope = _require_file(
         pdir / "classification.json", "缺少 classification.json;先运行 classify 并通过人工确认"
     )
@@ -1055,7 +1120,7 @@ def cmd_dossier(args: argparse.Namespace) -> None:
     if project is None:
         raise KeyError(f"Unknown project: {args.project}")
     pdir = _project_dir(args, args.project)
-    _require_approved(svc, args.project, pdir, ["data_review", "classification_review", "research_route_review"])
+    _require_approved(svc, args.project, pdir, _gate_steps(pdir, ["data_review", "classification_review", "research_route_review"]))
     plan_data = _require_file(pdir / "route_plan.json", "缺少 route_plan.json;先运行 analyze")
     if not plan_data.get("human_confirmed"):
         raise ValueError("研究路线尚未人工确认;先 resolve route_review 检查点")
@@ -1432,6 +1497,8 @@ def _import_table1(svc: WorkflowService, args: argparse.Namespace, pdir: Path) -
 
 
 def _import_table2(svc: WorkflowService, args: argparse.Namespace, pdir: Path) -> None:
+    # 回传表2 会请求补齐检查点并顶替当前待裁决检查点:必须先确认数据检查点,否则它会被顶掉而无法再裁决
+    _require_approved(svc, args.project, pdir, ["data_review"])
     rows = _read_table(args.file, ["asin"], TABLE2_COLUMNS)
     latest, bullets = _asin_views(pdir)
     edits = _table2_edits(pdir)
@@ -1458,11 +1525,21 @@ def _import_table2(svc: WorkflowService, args: argparse.Namespace, pdir: Path) -
     if changed == 0:
         raise ValueError("上传的表2与当前内容完全相同;没有需要重新审批的修改")
     snapshot = _snapshot_source(pdir, Path(args.file))
-    _invalidate(svc, args.project, pdir, "enrich_asins")  # 分类依赖卖点/地区,需重跑并重新审批
+    _invalidate(svc, args.project, pdir, "enrichment_review")  # 保留机器补齐,作废其确认与下游分类
     _save_json(pdir / "table2_edits.json", {"regions": regions, "bullets": bullet_edits,
                                             "file_sha256": _sha256_file(snapshot), "edited_at": utc_now_iso()})
+    machine = _load_json(pdir / "enrichment.json") if (pdir / "enrichment.json").is_file() else None
+    svc.set_step(args.project, "enrich_asins", StepStatus.COMPLETED if machine else StepStatus.SKIPPED)
+    checkpoint = svc.request_human_checkpoint(
+        args.project, "enrichment_review",
+        "表2 已被人工修改并重新上传,请复核补齐结果;确认前不能分类。",
+        {"summary": machine["summary"] if machine else None, "conflicts": machine["conflicts"] if machine else [],
+         "failures": machine["failures"] if machine else [], "human_table2_edits": True,
+         "table_edit": {"table": 2, "changed_cells": changed, "file_sha256": _sha256_file(snapshot)},
+         "artifact_hashes": _hashes(pdir, ["table2_edits.json"] + (["enrichment.json"] if machine else []))})
     _emit({"project_id": args.project, "table": 2, "changed_cells": changed,
-           "next": "重新运行 classify(表2 的人工修改会被采用),并重新确认分类检查点"})
+           "checkpoint_id": checkpoint.id, "checkpoint_step": "enrichment_review",
+           "next": "resolve --approve 重新确认补齐检查点后再 classify(表2 的人工修改会被采用)"})
 
 
 def _import_table3(svc: WorkflowService, args: argparse.Namespace, pdir: Path) -> None:
@@ -1508,6 +1585,32 @@ def cmd_import_table(args: argparse.Namespace) -> None:
         raise KeyError(f"Unknown project: {args.project}")
     pdir = _project_dir(args, args.project)
     {1: _import_table1, 2: _import_table2, 3: _import_table3}[args.table](svc, args, pdir)
+
+
+def cmd_reconcile(args: argparse.Namespace) -> None:
+    """把已计算的指标与人工结果逐项对账,输出差异报告(验收用,只读)。"""
+    svc = _service(args)
+    if svc.store.get_project(args.project) is None:
+        raise KeyError(f"Unknown project: {args.project}")
+    pdir = _project_dir(args, args.project)
+    market = _require_file(pdir / "market_metrics.json", "尚未分析;先运行 analyze")
+    competition = _load_json(pdir / "competition.json") if (pdir / "competition.json").exists() else None
+    new_products = _load_json(pdir / "new_products.json") if (pdir / "new_products.json").exists() else None
+    flat = flatten_metrics(market, competition, new_products)
+    ref = Path(args.reference)
+    if not ref.exists():
+        raise KeyError(f"参考表不存在: {args.reference}")
+    rows = reconcile(read_tabular_rows(ref), flat)
+    report = to_dicts(rows)
+    if args.output:
+        write_csv_rows(Path(args.output), report)
+    bad = [r for r in report if r["status"] != "MATCH"]
+    _emit({"project_id": args.project, "summary": summarize(rows), "mismatches": bad[:100],
+           "file": str(Path(args.output).resolve()) if args.output else None,
+           "report_name": Path(args.output).name if args.output else None,
+           "mismatches_truncated": len(bad) > 100,
+           "available_keys_sample": sorted(flat)[:20] if any(r["status"] == "MISSING" for r in report) else None,
+           "next": "全部 MATCH 才算该批对账通过;MISMATCH/MISSING 须逐项查明原因(口径差异/数据缺失/缺陷),不得为凑数改容差"})
 
 
 def cmd_projects(args: argparse.Namespace) -> None:
@@ -1569,6 +1672,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--wait", type=int, default=180)
     p.set_defaults(func=cmd_login)
 
+    p = sub.add_parser("enrich", help="商品补齐(表2:卖家所属地、卖点;需已登录 SellerSprite),完成后须在补齐检查点人工确认")
+    p.add_argument("--project", required=True)
+    p.set_defaults(func=cmd_enrich)
+
     p = sub.add_parser("classify", help="运行产品分类并请求人工复核")
     p.add_argument("--project", required=True)
     p.add_argument("--label", action="append", required=True, help="标签 key=中文名,可多次")
@@ -1576,7 +1683,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rule", action="append", default=[], help="规则 key=关键词1,关键词2,可多次")
     p.add_argument("--provider", choices=["rules", "llm"], default="rules",
                    help="分类提供者:rules=关键词规则(默认);llm=大模型(需 ANTHROPIC_API_KEY,歧义标待人工)")
-    p.add_argument("--enrich", action="store_true", help="分类前经 SellerSprite 补齐缺失地区与卖点(需已登录)")
+    p.add_argument("--enrich", action="store_true", help=argparse.SUPPRESS)  # 已废弃:请用独立的 enrich 命令
     p.set_defaults(func=cmd_classify)
 
     p = sub.add_parser("export-table", help="导出表1(清洗月度数据)/表2(唯一 ASIN 卖点地区)/表3(分类结果)供人工修改")
@@ -1590,6 +1697,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--table", type=int, choices=[1, 2, 3], required=True)
     p.add_argument("--file", required=True)
     p.set_defaults(func=cmd_import_table)
+
+    p = sub.add_parser("reconcile", help="指标与人工结果逐项对账(验收,只读):参考表 key,expected[,tolerance_abs,tolerance_pct]")
+    p.add_argument("--project", required=True)
+    p.add_argument("--reference", required=True)
+    p.add_argument("--output")
+    p.set_defaults(func=cmd_reconcile)
 
     p = sub.add_parser("projects", help="列出全部研究项目(跨会话恢复用)")
     p.set_defaults(func=cmd_projects)
