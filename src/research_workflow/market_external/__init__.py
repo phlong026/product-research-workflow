@@ -7,6 +7,7 @@ from .forecast import (
     SeriesPoint,
     extrapolate,
 )
+from .synthesis import CrossChannelSummary, build_cross_channel_summary
 from .tiktok import (
     CagrResult,
     ProjectionPoint,
@@ -36,6 +37,7 @@ from .trends import (
 __all__ = [
     "CagrResult",
     "CoverageAssumption",
+    "CrossChannelSummary",
     "EvidenceLedger",
     "ExternalEvidence",
     "ForecastPoint",
@@ -50,6 +52,7 @@ __all__ = [
     "TrendSeries",
     "UnitsRecord",
     "analyze_tiktok",
+    "build_cross_channel_summary",
     "cagr_2024_2026",
     "check_trends_consistency",
     "combine_for_chart",
