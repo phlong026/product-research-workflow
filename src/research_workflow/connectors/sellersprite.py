@@ -139,6 +139,39 @@ class SellerSpriteConnector:
             raw=raw_pages,
         )
 
+    async def product_research_by_nodes(
+        self,
+        *,
+        marketplace: str,
+        keyword: str | None = None,
+        month: str | None = None,
+        node_id_paths_list: Iterable[str],
+        page_size: int = 100,
+        max_pages: int = 20,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, ConnectorResponse]:
+        """Fetch each node separately (node x month) so results are never mixed.
+
+        Every node gets its own bounded-pagination ``product_research`` call; the
+        caller stores per-node responses and merges them downstream. A failing
+        node raises instead of returning a partial dict.
+        """
+        nodes = list(dict.fromkeys(node_id_paths_list))
+        if not nodes:
+            raise ValueError("node_id_paths_list must not be empty")
+        responses: dict[str, ConnectorResponse] = {}
+        for node in nodes:
+            responses[node] = await self.product_research(
+                marketplace=marketplace,
+                keyword=keyword,
+                month=month,
+                node_id_paths=[node],
+                page_size=page_size,
+                max_pages=max_pages,
+                extra=extra,
+            )
+        return responses
+
     async def asin_detail(self, *, marketplace: str, asin: str) -> ConnectorResponse:
         return await self.call_operation(
             "asin_detail",
