@@ -55,7 +55,7 @@ class DiscoverParams(_Params):
 
 class ClassifyParams(_Params):
     labels: dict[str, str] = Field(min_length=1, max_length=50)
-    rules: dict[str, str] = Field(default_factory=dict)
+    rules: dict[str, str] = Field(default_factory=dict, max_length=50)
     dimension: str = Field(default="segment", min_length=1, max_length=64)
     provider: str = Field(default="rules", pattern="^(rules|llm)$")
     enrich: bool = False
@@ -64,7 +64,7 @@ class ClassifyParams(_Params):
 class ResolveParams(_Params):
     checkpoint_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     approve: bool
-    edits: dict[str, str] = Field(default_factory=dict)
+    edits: dict[str, str] = Field(default_factory=dict, max_length=2000)
     select: list[str] = Field(default_factory=list, max_length=50)
 
 
@@ -183,11 +183,30 @@ def build_argv(command: str, params: _Params, *, project_id: str, project_dir: P
     return argv
 
 
+# 子进程只继承引擎确实需要的环境变量,不把宿主机上无关的密钥(云凭据等)带进去。
+ENV_ALLOW_EXACT = {"PATH", "HOME", "USER", "LANG", "TMPDIR", "TZ", "PYTHONPATH", "PYTHONUTF8", "VIRTUAL_ENV",
+                   "PRODUCT_RESEARCH_ENGINE", "ANTHROPIC_API_KEY", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+                   "http_proxy", "https_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE"}
+ENV_ALLOW_PREFIXES = ("LC_", "SELLERSPRITE_", "SIF_", "XIYOU_", "APIFY_", "RESEARCH_LLM_")
+# 回传给前端的结果里去掉服务器绝对路径
+PRIVATE_RESULT_KEYS = {"artifact_dir", "records_file", "dossier_dir", "report_md", "dashboard_html", "file"}
+GENERIC_ENGINE_ERROR = "引擎内部错误,请联系管理员并提供参考号 "
+
+
+def engine_env() -> dict[str, str]:
+    return {k: v for k, v in os.environ.items()
+            if k in ENV_ALLOW_EXACT or k.startswith(ENV_ALLOW_PREFIXES)}
+
+
+def public_result(payload: dict[str, Any] | None) -> dict[str, Any]:
+    return {k: v for k, v in (payload or {}).items() if k not in PRIVATE_RESULT_KEYS}
+
+
 def run_engine(argv: list[str], *, db_path: str, root: str, timeout: int) -> tuple[int, dict[str, Any] | None, str]:
     """在子进程中运行引擎 CLI;返回 (退出码, 末行 JSON, 截断后的 stderr)。"""
     cmd = [sys.executable, "-m", "research_workflow.cli", f"--db={db_path}", f"--root={root}", *argv]
     try:
-        done = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=os.environ.copy(),
+        done = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=engine_env(),
                               stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return 124, None, f"命令超时({timeout}s)"
@@ -215,7 +234,8 @@ class JobRunner:
     def run_sync(self, argv: list[str], timeout: int = 120) -> dict[str, Any]:
         code, payload, stderr = run_engine(argv, db_path=self.db_path, root=self.root, timeout=timeout)
         if code != 0:
-            raise RuntimeError((payload or {}).get("error") or stderr or f"引擎退出码 {code}")
+            logger.warning("sync engine call %s failed rc=%s stderr=%r", argv[0], code, stderr[-500:])
+            raise RuntimeError(str((payload or {}).get("error") or "引擎调用失败")[:500])
         return payload or {}
 
     def submit(self, *, project_id: str, command: str, params: dict[str, Any], user_id: str,
@@ -238,12 +258,16 @@ class JobRunner:
             code, payload, stderr = run_engine(argv, db_path=self.db_path, root=self.root,
                                                timeout=COMMAND_TIMEOUTS.get(command, 600))
             if code == 0:
-                self.store.update_job(job_id, status="succeeded", result_json=json.dumps(payload or {}, ensure_ascii=False),
+                self.store.update_job(job_id, status="succeeded",
+                                      result_json=json.dumps(public_result(payload), ensure_ascii=False),
                                       finished_at=utc_now_iso())
             else:
-                error = (payload or {}).get("error") or stderr or f"引擎退出码 {code}"
-                logger.warning("job %s (%s) failed: %s", job_id, command, error)
-                self.store.update_job(job_id, status="failed", error=str(error)[:2000], finished_at=utc_now_iso())
+                # 只回显引擎主动给出的业务错误;traceback/stderr 只进服务端日志(可能含路径与密钥片段)
+                business = (payload or {}).get("error")
+                logger.warning("job %s (%s) failed rc=%s stderr=%r", job_id, command, code, stderr[-800:])
+                message = (str(business)[:500] if business else
+                           "命令超时" if code == 124 else GENERIC_ENGINE_ERROR + job_id[:8])
+                self.store.update_job(job_id, status="failed", error=message, finished_at=utc_now_iso())
         except Exception as exc:  # noqa: BLE001 - 任何异常都必须落到作业状态,不能静默丢失
             logger.exception("job %s crashed", job_id)
             self.store.update_job(job_id, status="failed", error=f"执行器异常: {type(exc).__name__}",

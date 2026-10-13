@@ -16,13 +16,18 @@ uv pip install -e '.[dev,workflow,data,xlsx]' -p .venv
 
 ## 安全模型(上线前须经人工安全评审)
 
-- 口令 PBKDF2-HMAC-SHA256(60 万次迭代,随机盐);库中只存会话令牌的 SHA-256 摘要。
+已由独立评审代理审过一轮(1 HIGH / 6 MEDIUM / 10 LOW,无 CRITICAL),HIGH 与全部 MEDIUM 已修复并有回归测试(`tests/test_web_security.py`)。**这只是自动化评审,不能替代人工安全评审。**
+
+- 口令 PBKDF2-HMAC-SHA256(60 万次迭代,随机盐);库中只存会话令牌的 SHA-256 摘要。用户名统一规范化(NFKC+去空白+casefold),限流/查库/建号共用。
 - 会话 Cookie `HttpOnly; SameSite=Strict; Secure`;所有写请求需 `X-CSRF-Token`(登录/`GET /api/me` 返回)。
-- 登录连续失败 5 次锁定该用户名 60 秒(进程内;多实例需换共享存储)。
-- 项目访问:owner / editor / viewer;无权访问一律 404;admin 可访问全部。
-- 用户输入只会成为子进程 argv 的单个元素(`--flag=value`),不经 shell;参数全部经 pydantic 校验;工件下载为白名单。
-- 上传仅 csv/xlsx/json,默认上限 50 MB,文件名被清洗,按内容哈希落盘。
-- **已知限制**:无邮件找回/改口令界面(管理员用 CLI 重建);限流为进程内;未做审计日志表;未做 HTTPS 终止(交给反向代理)。
+- 登录限流三层:用户名+来源 IP 连续失败 5 次、单 IP 跨用户名 30 次、单用户名跨来源 60 次,各锁 60 秒;失败表有容量上限;口令校验并发闸(4)防 CPU 被打满。
+- 项目访问:owner / editor / viewer;无权访问一律 404;admin 可访问全部(项目 ID 必须是 UUID 且在引擎库中存在,杜绝路径穿越)。
+- 用户输入只会成为子进程 argv 的单个元素(`--flag=value`),不经 shell;参数全部经 pydantic 校验并有数量上限;工件下载为白名单;请求体上限 1 MB(上传除外)。
+- 子进程只继承白名单环境变量;作业错误只回显引擎主动给出的业务错误,traceback/stderr 只进服务端日志;回传结果去掉服务器绝对路径。
+- 上传仅 csv/xlsx/json,流式落盘并硬限 50 MB/文件(含 chunked)、每项目 200 个/1 GB;文件名清洗,按内容哈希落盘。
+- 每用户同时进行的作业 ≤3;每项目同时只有一个作业(DB 唯一索引兜底)。
+- 审计日志:登录成功/失败/限流、建号、授权、作业提交写入 `research_workflow.web.audit` logger(尚未落库)。
+- **仍未做(backlog)**:会话空闲超时与"注销全部会话";撤销成员/转移所有权接口;审计事件落库;LLM/实时取数的按用户配额;`__Host-` Cookie 前缀;多进程/多实例部署(限流与项目锁为进程内,须换共享存储;当前只支持单进程);改口令/找回界面(管理员用 CLI 重建账号);HTTPS 终止(交给反向代理)。
 
 ## API(JSON;除登录外均需会话 Cookie,写请求需 CSRF 头)
 

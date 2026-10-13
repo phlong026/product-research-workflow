@@ -9,12 +9,22 @@ import hmac
 import secrets
 import threading
 import time
+import unicodedata
 
 PBKDF2_ITERATIONS = 600_000  # OWASP 对 PBKDF2-HMAC-SHA256 的建议下限量级;测试中可调小
 MIN_PASSWORD_LENGTH = 12
 SESSION_TTL_SECONDS = 12 * 3600
-MAX_FAILED_LOGINS = 5
+MAX_FAILED_LOGINS = 5  # 同一 用户名+来源 的连续失败上限
+MAX_FAILED_PER_IP = 30  # 同一来源跨用户名的失败上限(防撞库)
+MAX_FAILED_PER_USER = 60  # 同一用户名跨来源的总闸(防分布式猜口令;远高于单源阈值,避免被轻易锁死)
 LOCKOUT_SECONDS = 60
+THROTTLE_CAPACITY = 10_000  # 失败记录表容量上限,超出后淘汰最旧项,防止被随机用户名撑爆内存
+MAX_CONCURRENT_PASSWORD_CHECKS = 4  # PBKDF2 很耗 CPU:限制并发校验数,防止登录接口被拿来打满 CPU
+
+
+def normalize_username(name: str) -> str:
+    """统一用户名:NFKC + 去首尾空白 + casefold。限流键、查库、建号都必须经此函数。"""
+    return unicodedata.normalize("NFKC", name).strip().casefold()
 
 
 def hash_password(password: str) -> str:
@@ -60,26 +70,37 @@ def validate_password_strength(password: str) -> None:
 
 
 class LoginThrottle:
-    """进程内的登录失败限流(单机部署足够;多实例部署需换共享存储)。"""
+    """进程内的登录失败限流(单进程部署;多进程/多实例须换共享存储)。
 
-    def __init__(self) -> None:
+    `limit` 次失败后锁定 `lockout` 秒;容量有上限,超出时淘汰最旧项。
+    """
+
+    def __init__(self, limit: int = MAX_FAILED_LOGINS, lockout: float = LOCKOUT_SECONDS,
+                 capacity: int = THROTTLE_CAPACITY) -> None:
+        self.limit, self.lockout, self.capacity = limit, lockout, capacity
         self._lock = threading.Lock()
         self._failures: dict[str, tuple[int, float]] = {}
 
-    def locked(self, username: str) -> bool:
+    def locked(self, key: str) -> bool:
         with self._lock:
-            count, since = self._failures.get(username, (0, 0.0))
-            if count >= MAX_FAILED_LOGINS and time.monotonic() - since < LOCKOUT_SECONDS:
+            count, since = self._failures.get(key, (0, 0.0))
+            if count >= self.limit and time.monotonic() - since < self.lockout:
                 return True
-            if count >= MAX_FAILED_LOGINS:
-                self._failures.pop(username, None)
+            if count >= self.limit:
+                self._failures.pop(key, None)
             return False
 
-    def record_failure(self, username: str) -> None:
+    def record_failure(self, key: str) -> None:
         with self._lock:
-            count, _ = self._failures.get(username, (0, 0.0))
-            self._failures[username] = (count + 1, time.monotonic())
+            count, _ = self._failures.get(key, (0, 0.0))
+            self._failures.pop(key, None)
+            self._failures[key] = (count + 1, time.monotonic())  # 重新插入 = 最近使用
+            while len(self._failures) > self.capacity:
+                self._failures.pop(next(iter(self._failures)))
 
-    def reset(self, username: str) -> None:
+    def reset(self, key: str) -> None:
         with self._lock:
-            self._failures.pop(username, None)
+            self._failures.pop(key, None)
+
+
+password_check_slots = threading.BoundedSemaphore(MAX_CONCURRENT_PASSWORD_CHECKS)

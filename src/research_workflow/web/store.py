@@ -47,6 +47,8 @@ class WebStore:
                     created_by TEXT NOT NULL, retry_of TEXT, created_at TEXT NOT NULL,
                     started_at TEXT, finished_at TEXT);
                 CREATE INDEX IF NOT EXISTS idx_jobs_project ON jobs(project_id, created_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_one_active ON jobs(project_id)
+                    WHERE status IN ('queued','running');
                 CREATE TABLE IF NOT EXISTS uploads (
                     id TEXT PRIMARY KEY, project_id TEXT NOT NULL, filename TEXT NOT NULL, sha256 TEXT NOT NULL,
                     size INTEGER NOT NULL, path TEXT NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -68,7 +70,7 @@ class WebStore:
 
     # --- users / sessions ---
     def create_user(self, username: str, password: str, role: str) -> str:
-        username = username.strip()
+        username = security.normalize_username(username)
         if not username or role not in ROLES:
             raise ValueError("用户名不能为空,角色须为 admin 或 researcher")
         user_id = str(uuid4())
@@ -80,7 +82,7 @@ class WebStore:
         return user_id
 
     def get_user_by_name(self, username: str) -> dict[str, Any] | None:
-        return self._one("SELECT * FROM users WHERE username = ?", (username.strip(),))
+        return self._one("SELECT * FROM users WHERE username = ?", (security.normalize_username(username),))
 
     def get_user(self, user_id: str) -> dict[str, Any] | None:
         return self._one("SELECT * FROM users WHERE id = ?", (user_id,))
@@ -143,6 +145,10 @@ class WebStore:
             return self.insert_job(project_id=project_id, command=command, params=params, created_by=created_by,
                                    attempts=attempts, retry_of=retry_of)
 
+    def active_job_count(self, user_id: str) -> int:
+        row = self._one("SELECT COUNT(*) AS n FROM jobs WHERE created_by=? AND status IN ('queued','running')", (user_id,))
+        return int(row["n"]) if row else 0
+
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         row = self._one("SELECT * FROM jobs WHERE id=?", (job_id,))
         return _job_view(row) if row else None
@@ -170,6 +176,10 @@ class WebStore:
         self._write("INSERT INTO uploads VALUES (?,?,?,?,?,?,?,?)",
                     (upload_id, project_id, filename, sha256, size, path, created_by, utc_now_iso()))
         return upload_id
+
+    def upload_usage(self, project_id: str) -> tuple[int, int]:
+        row = self._one("SELECT COUNT(*) AS n, COALESCE(SUM(size), 0) AS total FROM uploads WHERE project_id=?", (project_id,))
+        return (int(row["n"]), int(row["total"])) if row else (0, 0)
 
     def get_upload(self, project_id: str, upload_id: str) -> dict[str, Any] | None:
         return self._one("SELECT * FROM uploads WHERE id=? AND project_id=?", (upload_id, project_id))
