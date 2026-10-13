@@ -7,6 +7,7 @@ from research_workflow.analysis.models import MarketResearchReport
 from research_workflow.classification.models import ClassificationBatch
 from research_workflow.competition.models import CompetitionMetricsResult
 from research_workflow.data.models import BSRRecord
+from research_workflow.metrics.iteration import IterationResult
 from research_workflow.metrics.models import MarketMetricsResult
 from research_workflow.new_products.models import NewProductAnalysisResult
 from research_workflow.router.models import ResearchRoutePlan
@@ -44,3 +45,5 @@ class ResearchDossierInput:
     data_version: str | None = None
     data_hash: str | None = None
     approval_history: list[dict[str, object]] | None = None
+    # 产品迭代进程(metrics/iteration.py);缺省 None 向后兼容,对应小节/工作表写「未提供」。
+    iteration: IterationResult | None = None
