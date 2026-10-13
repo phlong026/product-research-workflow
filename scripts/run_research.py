@@ -76,7 +76,13 @@ from research_workflow.enrichment.models import ASINProfile
 from research_workflow.mcp import MCPGateway, MCPRegistry
 from research_workflow.metrics import build_market_metrics
 from research_workflow.metrics.models import MarketMetricsResult
-from research_workflow.new_products import NewProductConfig, NewProductSnapshot, analyze_new_products
+from research_workflow.metrics import IterationConfig, build_iteration_comparison
+from research_workflow.new_products import (
+    NewProductConfig,
+    NewProductSnapshot,
+    analyze_new_products,
+    build_new_product_queue,
+)
 from research_workflow.new_products.models import NewProductAnalysisResult
 from research_workflow.router import ResearchRouter
 from research_workflow.router.models import ResearchRoutePlan
@@ -285,7 +291,7 @@ STAGES = ["collect_bsr", "data_review", "enrich_asins", "classify", "classificat
           "apply_route_review", "dossier"]
 DERIVED_FILES = {"classify": ["classification.json", "enrichment.json"], "market_metrics": ["market_metrics.json",
                  "market_analysis.json", "competition.json", "new_products.json", "route_plan.json",
-                 "analysis_context.json"]}
+                 "analysis_context.json", "new_product_queue.json", "iteration.json"]}
 
 
 def _hashes(pdir: Path, names: list[str]) -> dict[str, str | None]:
@@ -855,6 +861,7 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     competition = build_competition_metrics(records)
 
     new_products = None
+    new_product_queue = None
     if args.new_products_file:
         new_source = _snapshot_source(pdir, Path(args.new_products_file))
         rows = read_tabular_rows(new_source)
@@ -868,6 +875,7 @@ def cmd_analyze(args: argparse.Namespace) -> None:
                 account_type=str(_col(row, "账号类型", "account_type") or "UNKNOWN"),
                 segment=str(_col(row, "细分", "segment") or "unknown"),
                 eligible=_eligible(_col(row, "eligible", "纳入研究")),
+                parent_asin=str(_col(row, "父ASIN", "parent_asin")).strip().upper(),
             )
             for row in rows
             if str(_col(row, "ASIN", "asin")).strip()
@@ -879,10 +887,16 @@ def cmd_analyze(args: argparse.Namespace) -> None:
                 consecutive_months=args.consecutive_months,
                 early_threshold_window_months=args.early_window,
                 current_survival_threshold=args.survival_threshold,
+                promotion_waist_sales_threshold=args.promotion_threshold,
+                retention_sales_threshold=args.retention_threshold,
+                study_month=args.study_month,
             ),
         )
+        queue_month = args.study_month or max(snapshot.month for snapshot in snapshots)
+        new_product_queue = build_new_product_queue(snapshots, study_month=queue_month)
 
     route_plan = ResearchRouter().suggest(market, competition, new_products)
+    iteration = build_iteration_comparison(records, classifications, config=IterationConfig(as_of=_today()))
 
     _invalidate(svc, args.project, pdir, "market_metrics")
     _save_json(pdir / "market_metrics.json", market.to_dict())
@@ -890,6 +904,8 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     _save_json(pdir / "competition.json", competition.to_dict())
     if new_products is not None:
         _save_json(pdir / "new_products.json", new_products.to_dict())
+        _save_json(pdir / "new_product_queue.json", new_product_queue.to_dict())
+    _save_json(pdir / "iteration.json", iteration.to_dict())
     _save_json(pdir / "route_plan.json", route_plan.to_dict())
     _save_json(pdir / "analysis_context.json", {
         "classification_version": envelope["batch"]["version"],
@@ -911,7 +927,8 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     checkpoint = svc.request_human_checkpoint(args.project, "research_route_review",
         "请确认下一步研究分支。确认只登记研究路线，不自动执行支线。",
         {**route_plan.to_dict(), "artifact_hashes": _hashes(pdir, ["market_metrics.json",
-            "market_analysis.json", "competition.json", "new_products.json", "route_plan.json", "analysis_context.json"])})
+            "market_analysis.json", "competition.json", "new_products.json", "route_plan.json", "analysis_context.json",
+            "new_product_queue.json", "iteration.json"])})
 
     latest = market.market[-1] if market.market else None
     _emit(
@@ -1008,7 +1025,8 @@ def cmd_dossier(args: argparse.Namespace) -> None:
     output = Path(args.output)
     approvals = svc.store.get_state(args.project).get("approved_checkpoints", {})
     evidence_names = ["records.json", "quality.json", "sources.json", "classification.json", "analysis_context.json",
-                      "market_metrics.json", "market_analysis.json", "competition.json", "new_products.json", "route_plan.json"]
+                      "market_metrics.json", "market_analysis.json", "competition.json", "new_products.json", "route_plan.json",
+                      "new_product_queue.json", "iteration.json", "enrichment.json", "coverage.json", "nodes.json"]
     evidence_files = {name: pdir / name for name in evidence_names if (pdir / name).is_file()}
     evidence_files.update({source.sha256 + Path(source.source).suffix: (Path(source.source) if Path(source.source).is_absolute() else pdir / source.source) for source in sources})
     approval_history = {key: dataclasses.asdict(svc.store.get_checkpoint(value)) for key,value in approvals.items()}
@@ -1154,6 +1172,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--consecutive-months", type=int, default=3)
     p.add_argument("--early-window", type=int, default=3)
     p.add_argument("--survival-threshold", type=int, default=None)
+    p.add_argument("--promotion-threshold", type=int, default=None,
+                   help="推起成功的人工腰部销量阈值(默认回退 --sales-threshold,须人工确认)")
+    p.add_argument("--retention-threshold", type=int, default=None,
+                   help="留存达标销量阈值(默认回退 --survival-threshold/--sales-threshold,须人工确认)")
+    p.add_argument("--study-month", help="研究当月 YYYY-MM;提供时校验新品输入最大月份必须一致")
     p.add_argument("--pair", action="append", default=[], help="份额分解对 YYYY-MM:YYYY-MM")
     p.add_argument("--period", action="append", default=[], help="跨期比较 a起点:a终点:b起点:b终点")
     p.set_defaults(func=cmd_analyze)
