@@ -99,3 +99,13 @@ def test_node_discover_confirm_and_enforcement(run, tmp_path):
     run("nodes-confirm", "--project", pid, "--node", "N1", "--node", "N2")
     f = _csv(tmp_path, "2026-01.csv", "ASIN,月销量\nA,10\n")
     assert "未经人工确认" in run.fail("ingest", "--project", pid, "--file", f, "--month", "2026-01", "--node", "N7")
+
+
+def test_merge_prefers_valid_zero_over_invalid_sales():
+    merged = merge_node_rows({
+        "N1": [{"asin": "A", "monthly_sales": "n/a"}],
+        "N2": [{"asin": "A", "monthly_sales": 0}],
+    })
+    assert merged[0]["monthly_sales"] == 0 and merged[0]["_node_ids"] == ["N1", "N2"]
+    merged = merge_node_rows({"N1": [{"asin": "A", "monthly_sales": 0}], "N2": [{"asin": "A", "monthly_sales": "n/a"}]})
+    assert merged[0]["monthly_sales"] == 0

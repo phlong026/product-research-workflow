@@ -155,3 +155,45 @@ def test_llm_requires_bullet_coverage(cli, monkeypatch):
     cli("enrich", "--project", pid, "--details-file", _w(cli.tmp, "d.csv", "ASIN,标题\nN1,Nugget Maker\nB1,Bullet Maker\n"))
     monkeypatch.setattr(rr, "_build_llm_provider", lambda args: AnthropicClassificationProvider(client=_client([])))
     assert "卖点覆盖率" in cli.fail("classify", "--project", pid, "--label", "nugget=咀嚼冰", "--provider", "llm")
+
+
+# --- 评审意见回归 ---
+
+def test_llm_transient_errors_go_through_retry_wrapper_and_degrade_batch():
+    class Flaky:
+        def __init__(self):
+            self.calls = 0
+
+        async def create(self, **kwargs):
+            self.calls += 1
+            if self.calls <= 2:
+                raise TimeoutError("boom")
+            return SimpleNamespace(stop_reason="end_turn", usage=None,
+                                   content=[SimpleNamespace(type="text", text='[{"asin":"A","label":"nugget"}]')])
+
+    client = SimpleNamespace(messages=Flaky())
+    provider = AnthropicClassificationProvider(client=client, retry_delay_seconds=0)
+    assert [r["asin"] for r in asyncio.run(provider.classify(SCHEMA, _profiles("A")))] == ["A"]
+    assert client.messages.calls == 3
+
+    class Dead:
+        async def create(self, **kwargs):
+            raise TimeoutError("down")
+
+    dead = AnthropicClassificationProvider(client=SimpleNamespace(messages=Dead()), retry_delay_seconds=0)
+    assert asyncio.run(dead.classify(SCHEMA, _profiles("A", "B"))) == []   # 不抛异常，批次降级
+    assert dead.usage.failed_asins == ["A", "B"] and "TimeoutError" in dead.usage.errors[0]
+
+
+def test_cli_fails_loudly_when_every_llm_batch_fails(cli, monkeypatch):
+    import scripts.run_research as rr
+
+    class Dead:
+        async def create(self, **kwargs):
+            raise TimeoutError("down")
+
+    pid = _ingested(cli)
+    cli("enrich", "--project", pid, "--details-file", _w(cli.tmp, "details.csv", DETAILS))
+    monkeypatch.setattr(rr, "_build_llm_provider", lambda args: AnthropicClassificationProvider(
+        client=SimpleNamespace(messages=Dead()), retry_delay_seconds=0))
+    assert "全部失败" in cli.fail("classify", "--project", pid, "--label", "nugget=咀嚼冰", "--provider", "llm")

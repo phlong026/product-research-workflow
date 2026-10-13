@@ -38,6 +38,10 @@ def write_xlsx(path: str | Path, sheets: dict[str, Iterable[dict[str, Any]]]) ->
             sheet.append(headers)
             for row in rows:
                 sheet.append([_cell(row.get(h)) for h in headers])
+                for cell in sheet[sheet.max_row]:
+                    # 不可信文本（供应商字段、人工编辑、证据）一律作为字面文本，绝不解释为公式。
+                    if isinstance(cell.value, str):
+                        cell.data_type = "s"
             sheet.freeze_panes = "A2"
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

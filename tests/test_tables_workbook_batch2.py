@@ -128,3 +128,57 @@ def test_dossier_includes_editable_workbook_with_blank_human_decision(cli):
     assert "workbook.xlsx" in {f["path"] for f in manifest["files"]}
     raw_sheet = wb["原始数据"]
     assert raw_sheet.max_row == 3  # 表头 + 两条原始候选行
+
+
+# --- 评审意见回归 ---
+
+def test_allow_month_change_really_removes_omitted_month(cli):
+    pid = cli("init", "--product", "Ice Maker", "--marketplace", "US")["project_id"]
+    f1 = _w(cli.tmp, "2026-01.csv", CSV)
+    f2 = _w(cli.tmp, "2026-02.csv", CSV.replace("100", "120"))
+    cli("ingest", "--project", pid, "--file", f1, "--file", f2)
+    csv = cli.tmp / "t1.csv"
+    cli("table-export", "--project", pid, "--table", "1", "--output", str(csv))
+    kept = [ln for i, ln in enumerate(csv.read_text(encoding="utf-8-sig").splitlines()) if i == 0 or not ln.startswith("2026-02")]
+    csv.write_text("\n".join(kept) + "\n", encoding="utf-8-sig")
+    assert "月份集合" in cli.fail("table-import", "--project", pid, "--table", "1", "--file", str(csv))
+    out = cli("table-import", "--project", pid, "--table", "1", "--file", str(csv), "--allow-month-change")
+    assert set(out["months"]) == {"2026-01"}
+    pdir = cli.tmp / "projects" / pid
+    assert set(json.loads((pdir / "records.json").read_text(encoding="utf-8"))) == {"2026-01"}
+    assert set(json.loads((pdir / "quality.json").read_text(encoding="utf-8"))) == {"2026-01"}
+    assert all(not k.startswith("2026-02") for k in json.loads((pdir / "sources.json").read_text(encoding="utf-8")))
+    assert set(json.loads((pdir / "candidates.json").read_text(encoding="utf-8"))) == {"2026-01"}
+
+
+def test_workbook_text_starting_with_equals_is_a_literal_not_a_formula(tmp_path):
+    from research_workflow.data.xlsx import write_xlsx
+
+    path = write_xlsx(tmp_path / "x.xlsx", {"s": [{"标题": '=HYPERLINK("http://evil","x")', "n": 5, "plus": "+1+1", "at": "@SUM(1)"}]})
+    ws = load_workbook(path)["s"]
+    cell = ws["A2"]
+    assert cell.data_type == "s" and cell.value == '=HYPERLINK("http://evil","x")'
+    assert all(c.data_type != "f" for row in ws.iter_rows() for c in row)
+    assert ws["B2"].value == 5
+
+
+def test_csv_export_neutralizes_formulas_but_roundtrips_exactly(tmp_path):
+    from research_workflow.data import read_tabular_rows, write_csv_rows
+
+    rows = [{"标题": "=cmd|' /C calc'!A0", "品牌": "-X Brand", "销量": -5, "ok": "plain"}]
+    path = write_csv_rows(tmp_path / "t.csv", rows)
+    raw = path.read_text(encoding="utf-8-sig")
+    assert "'=cmd" in raw and "'-X Brand" in raw       # 打开 CSV 不会被当公式
+    back = read_tabular_rows(path)[0]
+    assert back["标题"] == "=cmd|' /C calc'!A0" and back["品牌"] == "-X Brand" and back["ok"] == "plain"
+
+
+def test_cli_help_strings_are_valid_for_argparse_formatting():
+    import argparse
+
+    from scripts.run_research import build_parser
+
+    parser = build_parser()
+    sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    for name, sp in sub.choices.items():
+        sp.format_help()  # 帮助文本里含未转义 % 会在这里抛 ValueError（Python 3.14 会在构建解析器时就抛）

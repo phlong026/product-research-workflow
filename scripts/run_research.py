@@ -369,6 +369,7 @@ def _persist_ingest(
     sources: dict[str, Any],
     source_mode: str,
     candidates: dict[str, dict[str, list[dict[str, Any]]]] | None = None,
+    drop_months: set[str] | None = None,
 ) -> None:
     by_month: dict[str, list[dict[str, Any]]] = (
         _load_json(pdir / "records.json") if (pdir / "records.json").exists() else {}
@@ -380,6 +381,11 @@ def _persist_ingest(
         _load_json(pdir / "sources.json") if (pdir / "sources.json").exists() else {}
     )
     summary: dict[str, Any] = {}
+    for month in sorted(drop_months or ()):  # 人工明确删除的月份：连同质量记录、候选池一并移除
+        by_month.pop(month, None)
+        quality.pop(month, None)
+        if candidates is not None:
+            candidates.pop(month, None)
     for result in results:
         by_month[result.month] = [record.to_dict() for record in result.records]
         quality[result.month] = {
@@ -400,7 +406,8 @@ def _persist_ingest(
     replaced = {(source_month(key), value.get("node") or NO_NODE) for key, value in sources.items()
                 for value in [value]}
     all_sources = {key: value for key, value in all_sources.items()
-                   if (source_month(key), value.get("node") or NO_NODE) not in replaced}
+                   if (source_month(key), value.get("node") or NO_NODE) not in replaced
+                   and source_month(key) not in (drop_months or ())}
     all_sources.update(sources)
     if not results or any(not result.records for result in results):
         raise ValueError("每个导入月份必须有有效数据;空数据不能作为零销量市场进入分析")
@@ -724,6 +731,8 @@ def cmd_classify(args: argparse.Namespace) -> None:
     service = ClassificationService(provider)
     batch = asyncio.run(service.classify(schema, list(profiles.values())))
     if args.provider == "llm":
+        if profiles and len(set(provider.usage.failed_asins)) >= len(profiles):
+            raise ValueError("LLM 分类全部失败（调用异常/被拒绝/输出非法），未生成分类结果；检查密钥、网络与用量后重试")
         usage = dataclasses.asdict(provider.usage)
         llm_meta = {"model": provider.model, "usage": usage}
 
@@ -1042,7 +1051,10 @@ def cmd_table_import(args: argparse.Namespace) -> None:
             "node": "_human", "source": snapshot.relative_to(pdir).as_posix(), "sha256": _sha256_file(snapshot),
             "note": f"{len(changes)} 处人工修改，明细见 table_edits.json",
         }
-    _persist_ingest(svc, args, pdir, results, sources, source_mode="human_table_edit")
+    dropped = set(old_by_month) - set(new_by_month)
+    candidates = _load_json(pdir / "candidates.json") if (pdir / "candidates.json").exists() else None
+    _persist_ingest(svc, args, pdir, results, sources, source_mode="human_table_edit",
+                    candidates=candidates, drop_months=dropped)
     _save_json(log_path, log)
 
 
@@ -1497,7 +1509,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--model", help="LLM 模型 ID；缺省读 RESEARCH_LLM_MODEL")
     p.add_argument("--batch-size", type=int, default=25)
     p.add_argument("--min-bullets-coverage", type=float, default=50.0,
-                   help="LLM 分类要求的最低卖点覆盖率(%)")
+                   help="LLM 分类要求的最低卖点覆盖率(%%)")
     p.set_defaults(func=cmd_classify)
 
     p = sub.add_parser("new-products-select", help="筛选近 N 天新品（排除老商品新变体）并导出新品跟踪表")

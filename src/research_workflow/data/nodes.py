@@ -109,6 +109,11 @@ def discover_nodes(
     return NodeProposal(primary, related, others, total_rows, without_node)
 
 
+def _rank(sales: int | None) -> int:
+    """有效销量（含 0）一律优于无效值；None 才是最低。"""
+    return -1 if sales is None else sales
+
+
 def merge_node_rows(rows_by_node: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
     """合并多个节点的候选行。同一 ASIN 出现在多个节点只保留一行（销量最高者），
     并在 `_node_ids` 中记录它出现过的全部节点，保证多节点合并后不重复计销量。
@@ -129,7 +134,7 @@ def merge_node_rows(rows_by_node: dict[str, list[dict[str, Any]]]) -> list[dict[
             current_sales = (
                 _to_int(_first(current, ALIASES["monthly_sales"], None), None) if current else None
             )
-            if current is None or (sales or -1) > (current_sales or -1):
+            if current is None or _rank(sales) > _rank(current_sales):
                 chosen[asin] = row
     merged = [{**row, NODE_TAG: list(seen_nodes[asin])} for asin, row in chosen.items()]
     return merged + anonymous

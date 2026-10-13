@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from research_workflow.connectors.base import ConnectorError, with_retries
 from research_workflow.enrichment.models import ASINProfile
 
 from .models import ClassificationSchema
@@ -29,6 +30,7 @@ class LLMUsage:
     input_tokens: int = 0
     output_tokens: int = 0
     failed_asins: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
 
 
 class AnthropicClassificationProvider:
@@ -40,6 +42,9 @@ class AnthropicClassificationProvider:
         batch_size: int = 25,
         effort: str = "medium",
         max_tokens: int = 8000,
+        timeout_seconds: float = 300.0,
+        retry_attempts: int = 3,
+        retry_delay_seconds: float = 1.0,
     ) -> None:
         if batch_size < 1:
             raise ValueError("batch_size must be >= 1")
@@ -48,6 +53,9 @@ class AnthropicClassificationProvider:
         self.batch_size = batch_size
         self.effort = effort
         self.max_tokens = max_tokens
+        self.timeout_seconds = timeout_seconds
+        self.retry_attempts = retry_attempts
+        self.retry_delay_seconds = retry_delay_seconds
         self.usage = LLMUsage()
         self._client = client
 
@@ -84,12 +92,21 @@ class AnthropicClassificationProvider:
         client = self._get_client()
         prompt = build_classification_prompt(schema, chunk)
         for _attempt in range(2):
-            response = await client.messages.create(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                output_config={"effort": self.effort},
-                messages=[{"role": "user", "content": prompt}],
-            )
+            try:
+                response = await with_retries(
+                    lambda: client.messages.create(
+                        model=self.model,
+                        max_tokens=self.max_tokens,
+                        output_config={"effort": self.effort},
+                        messages=[{"role": "user", "content": prompt}],
+                    ),
+                    attempts=self.retry_attempts,
+                    base_delay_seconds=self.retry_delay_seconds,
+                    timeout_seconds=self.timeout_seconds,
+                )
+            except ConnectorError as exc:  # 超时/限流/网络：该批降级为 unknown，交人工
+                self.usage.errors.append(str(exc))
+                return None
             self.usage.requests += 1
             usage = getattr(response, "usage", None)
             self.usage.input_tokens += int(getattr(usage, "input_tokens", 0) or 0)
