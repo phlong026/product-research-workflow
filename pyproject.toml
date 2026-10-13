@@ -24,6 +24,10 @@ workflow = [
 data = [
   "polars>=1,<2",
   "fastexcel>=0.13,<1",
+  "openpyxl>=3.1,<4",
+]
+llm = [
+  "anthropic>=1,<2",
 ]
 
 [tool.pytest.ini_options]

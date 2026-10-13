@@ -43,6 +43,11 @@ from research_workflow.classification.models import (
     ClassificationBatch,
     ProductClassification,
 )
+from research_workflow.enrichment.adapters import merge_profiles, profile_from_payload
+from research_workflow.enrichment.service import (
+    ASINEnrichmentService,
+    SellerSpriteProductDetailProvider,
+)
 from research_workflow.competition import build_competition_metrics
 from research_workflow.competition.models import CompetitionMetricsResult
 from research_workflow.data import MonthlyBSRConfig, build_monthly_top
@@ -205,13 +210,31 @@ def _resolve_month(args: argparse.Namespace, path: Path) -> str:
     return f"{match.group(1)}-{match.group(2)}"
 
 
+def _valid_profiles(pdir: Path) -> dict[str, ASINProfile] | None:
+    """返回与当前 records.json 绑定的商品补齐画像；过期/缺失返回 None（绝不使用过期补齐）。"""
+    path = pdir / "profiles.json"
+    if not path.exists() or not (pdir / "records.json").exists():
+        return None
+    doc = _load_json(path)
+    if doc.get("records_sha256") != _sha256_file(pdir / "records.json"):
+        return None
+    return {asin: rebuild(ASINProfile, row) for asin, row in doc["profiles"].items()}
+
+
 def _load_records(pdir: Path) -> list[BSRRecord]:
     by_month: dict[str, list[dict[str, Any]]] = _require_file(
         pdir / "records.json", "尚无数据;先运行 ingest"
     )
+    profiles = _valid_profiles(pdir) or {}
     records: list[BSRRecord] = []
     for month in sorted(by_month):
-        records.extend(rebuild(BSRRecord, row) for row in by_month[month])
+        for row in by_month[month]:
+            record = rebuild(BSRRecord, row)
+            profile = profiles.get(record.asin)
+            # 卖家地区补齐：只填 UNKNOWN/空白，不覆盖源数据已有值。
+            if profile and record.seller_region in {"", "UNKNOWN"} and profile.seller_region not in {"", "UNKNOWN"}:
+                record.seller_region = profile.seller_region
+            records.append(record)
     return records
 
 
@@ -229,7 +252,7 @@ STAGES = ["collect_bsr", "data_review", "enrich_asins", "classify", "classificat
           "apply_classification_review", "market_metrics", "market_analysis", "competition_metrics",
           "new_product_analysis", "research_route", "route_review", "research_route_review",
           "apply_route_review", "dossier"]
-DERIVED_FILES = {"classify": ["classification.json"], "market_metrics": ["market_metrics.json",
+DERIVED_FILES = {"enrich_asins": ["profiles.json"], "classify": ["classification.json"], "market_metrics": ["market_metrics.json",
                  "market_analysis.json", "competition.json", "new_products.json", "route_plan.json",
                  "analysis_context.json"]}
 
@@ -560,6 +583,86 @@ def cmd_login(args: argparse.Namespace) -> None:
            "next": "ingest --live" if result.get("ready") is True else "请在本机浏览器完成登录后重新检查"})
 
 
+def _build_llm_provider(args: argparse.Namespace):
+    """构建 LLM 分类 Provider；测试通过替换本函数注入假客户端。"""
+    from research_workflow.classification.llm import AnthropicClassificationProvider
+
+    _load_dotenv(ROOT / ".env")
+    return AnthropicClassificationProvider(model=args.model, batch_size=args.batch_size)
+
+
+class _RowDetailProvider:
+    """离线补齐：商品详情来自人工提供/修改的表格（表2 上传也走这里）。"""
+
+    name = "file"
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.by_asin = {
+            str(_col(row, "ASIN", "asin")).strip().upper(): row for row in rows if str(_col(row, "ASIN", "asin")).strip()
+        }
+
+    async def get_product_detail(self, asin: str, marketplace: str) -> Any:
+        row = self.by_asin.get(asin.upper())
+        if row is None:
+            raise KeyError(asin)
+        return row
+
+
+def cmd_enrich(args: argparse.Namespace) -> None:
+    """补齐商品卖点、卖家所属地等（表2）。live 走 SellerSprite asin_detail，离线读 --details-file。"""
+    svc = _service(args)
+    project = svc.store.get_project(args.project)
+    if project is None:
+        raise KeyError(f"Unknown project: {args.project}")
+    pdir = _project_dir(args, args.project)
+    _require_approved(svc, args.project, pdir, ["data_review"])
+    records = _load_records(pdir)
+    asins = list(dict.fromkeys(r.asin for r in records))
+
+    if args.live:
+        _load_dotenv(ROOT / ".env")
+        connector = SellerSpriteConnector(_build_gateway(ROOT / "config" / "mcp.json"))
+
+        async def run_live():
+            await connector.validate()
+            return await ASINEnrichmentService(
+                SellerSpriteProductDetailProvider(connector), concurrency=args.concurrency
+            ).enrich(asins, project.marketplace)
+
+        result = asyncio.run(run_live())
+        source: dict[str, Any] = {"mode": "live", "provider": "sellersprite"}
+    else:
+        if not args.details_file:
+            raise SystemExit(_emit({"error": "需要 --details-file（表2 明细）或 --live"}) or 1)
+        snapshot = _snapshot_source(pdir, Path(args.details_file))
+        provider = _RowDetailProvider(read_tabular_rows(snapshot))
+        result = asyncio.run(ASINEnrichmentService(provider).enrich(asins, project.marketplace))
+        source = {"mode": "file", "source": snapshot.relative_to(pdir).as_posix(), "sha256": _sha256_file(snapshot)}
+
+    profiles = result.profiles
+    missing = sorted(set(asins) - set(profiles))
+    unknown_region_before = sum(1 for r in records if r.seller_region in {"", "UNKNOWN"})
+    filled_region = len({r.asin for r in records
+                         if r.seller_region in {"", "UNKNOWN"} and profiles.get(r.asin)
+                         and profiles[r.asin].seller_region not in {"", "UNKNOWN"}})
+    coverage = {
+        "asins": len(asins), "profiles": len(profiles), "missing": len(missing),
+        "with_bullets": sum(1 for p in profiles.values() if p.bullets),
+        "seller_region_filled_asins": filled_region,
+        "unknown_seller_region_rows_before": unknown_region_before,
+    }
+    _invalidate(svc, args.project, pdir, "enrich_asins")
+    _save_json(pdir / "profiles.json", {
+        "records_sha256": _sha256_file(pdir / "records.json"),
+        "source": source, "coverage": coverage, "missing_asins": missing,
+        "profiles": {asin: p.to_dict() for asin, p in sorted(profiles.items())},
+    })
+    svc.set_step(args.project, "enrich_asins", StepStatus.COMPLETED, output_ref="profiles.json")
+    _emit({"project_id": args.project, "enrichment": "completed", "coverage": coverage,
+           "missing_asins": missing[:50],
+           "next": "classify（默认使用补齐后的卖点；缺失商品不会被当作已补齐）"})
+
+
 def cmd_classify(args: argparse.Namespace) -> None:
     svc = _service(args)
     if svc.store.get_project(args.project) is None:
@@ -568,42 +671,67 @@ def cmd_classify(args: argparse.Namespace) -> None:
     _require_approved(svc, args.project, pdir, ["data_review"])
     records = _load_records(pdir)
 
+    enriched = _valid_profiles(pdir)
     profiles: dict[str, ASINProfile] = {}
     for record in records:
-        profiles.setdefault(
-            record.asin,
-            ASINProfile(
-                asin=record.asin,
-                title=record.title,
-                brand=record.brand,
-                seller_region=record.seller_region or "UNKNOWN",
-                launch_date=record.launch_date,
-                image_url=record.image_url,
-            ),
+        base = ASINProfile(
+            asin=record.asin,
+            title=record.title,
+            brand=record.brand,
+            seller_region=record.seller_region or "UNKNOWN",
+            launch_date=record.launch_date,
+            image_url=record.image_url,
         )
-    # 离线模式:画像直接来自 BSR 行,跳过 MCP 补全(实连见 references/live-mcp.md)。
-    # Mark skipped only after successful classification and invalidation below.
+        extra = (enriched or {}).get(record.asin)
+        if extra is not None:
+            base = merge_profiles(extra, base)  # 补齐画像优先，缺失字段由 BSR 行兜底
+        profiles.setdefault(record.asin, base)
+    bullets_coverage = (
+        sum(1 for p in profiles.values() if p.bullets) / len(profiles) * 100.0 if profiles else 0.0
+    )
 
     labels = [
         ClassificationLabel(key=key, name=name)
         for key, name in _parse_kv(args.label, "--label").items()
     ]
     schema = ClassificationSchema(project_id=args.project, dimension=args.dimension, labels=labels)
-    rules = {
-        key: [word.strip() for word in value.split(",") if word.strip()]
-        for key, value in _parse_kv(args.rule, "--rule").items()
-    } if args.rule else {}
-    service = ClassificationService(RuleClassificationProvider(rules))
+    llm_meta: dict[str, Any] | None = None
+    if args.provider == "llm":
+        if enriched is None:
+            raise ValueError("LLM 分类必须基于真实卖点：先运行 enrich 补齐商品信息")
+        if bullets_coverage < args.min_bullets_coverage:
+            raise ValueError(
+                f"卖点覆盖率仅 {bullets_coverage:.0f}%（要求 ≥{args.min_bullets_coverage:.0f}%）；"
+                "请补齐数据后重试，或显式降低 --min-bullets-coverage"
+            )
+        provider = _build_llm_provider(args)
+    else:
+        rules = {
+            key: [word.strip() for word in value.split(",") if word.strip()]
+            for key, value in _parse_kv(args.rule, "--rule").items()
+        } if args.rule else {}
+        provider = RuleClassificationProvider(rules)
+    service = ClassificationService(provider)
     batch = asyncio.run(service.classify(schema, list(profiles.values())))
+    if args.provider == "llm":
+        usage = dataclasses.asdict(provider.usage)
+        llm_meta = {"model": provider.model, "usage": usage}
 
-    _invalidate(svc, args.project, pdir, "enrich_asins")
-    svc.set_step(args.project, "enrich_asins", StepStatus.SKIPPED)
-    _save_json(pdir / "classification.json", {"schema": schema.canonical_payload(), "batch": batch.to_dict()})
+    if enriched is not None:
+        _invalidate(svc, args.project, pdir, "classify")
+    else:
+        _invalidate(svc, args.project, pdir, "enrich_asins")
+        svc.set_step(args.project, "enrich_asins", StepStatus.SKIPPED)
+    meta = {"provider": provider.name, "enrichment": "completed" if enriched is not None else "skipped",
+            "bullets_coverage_pct": bullets_coverage, "llm": llm_meta}
+    _save_json(pdir / "classification.json", {"schema": schema.canonical_payload(), "batch": batch.to_dict(), "meta": meta})
     svc.set_step(args.project, "classify", StepStatus.COMPLETED, output_ref="classification.json")
     checkpoint = svc.request_human_checkpoint(args.project, "classification_review",
-        "请检查规则分类结果；可修改后确认继续。当前未调用 LLM，未执行 ASIN 补全。",
-        {"schema": schema.canonical_payload(), "classification": batch.to_dict(),
-         "artifact_hashes": _hashes(pdir, ["classification.json"])})
+        ("请检查 AI 分类结果（基于补齐后的商品卖点）；可修改后确认继续。" if args.provider == "llm"
+         else "请检查规则分类结果；可修改后确认继续。当前未调用 LLM。")
+        + ("" if enriched is not None else "未执行 ASIN 补全。"),
+        {"schema": schema.canonical_payload(), "classification": batch.to_dict(), "meta": meta,
+         "artifact_hashes": _hashes(pdir, ["classification.json", "profiles.json"])})
 
     counts: dict[str, int] = {}
     for row in batch.rows.values():
@@ -612,8 +740,10 @@ def cmd_classify(args: argparse.Namespace) -> None:
         {
             "project_id": args.project,
             "classification_version": batch.version,
-            "classification_provider": "rules",
-            "enrichment": "skipped",
+            "classification_provider": meta["provider"],
+            "enrichment": meta["enrichment"],
+            "bullets_coverage_pct": bullets_coverage,
+            "llm": llm_meta,
             "label_counts": counts,
             "total_asins": len(batch.rows),
             "checkpoint_id": checkpoint.id,
@@ -693,7 +823,7 @@ def cmd_resolve(args: argparse.Namespace) -> None:
         )
         if edits:
             response["edits"] = edits
-        _save_json(pdir / "classification.json", {"schema": envelope["schema"], "batch": batch.to_dict()})
+        _save_json(pdir / "classification.json", {**envelope, "batch": batch.to_dict()})
         svc.set_step(args.project, "apply_classification_review", StepStatus.COMPLETED)
 
     if args.approve and checkpoint.step_key in {"route_review", "research_route_review"}:
@@ -866,8 +996,10 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     _save_json(pdir / "route_plan.json", route_plan.to_dict())
     _save_json(pdir / "analysis_context.json", {
         "classification_version": envelope["batch"]["version"],
-        "classification_provider": "rules", "analysis_provider": analysis.provider,
-        "enrichment": "skipped", "pairs": pairs, "periods": periods,
+        "classification_provider": (envelope.get("meta") or {}).get("provider", "rules"),
+        "analysis_provider": analysis.provider,
+        "enrichment": (envelope.get("meta") or {}).get("enrichment", "skipped"),
+        "classification_llm": (envelope.get("meta") or {}).get("llm"), "pairs": pairs, "periods": periods,
         "new_products_source": ({"artifact_id": "new-products", "name": Path(args.new_products_file).name,
             "kind": new_source.suffix.lstrip("."), "source": new_source.relative_to(pdir).as_posix(),
             "sha256": _sha256_file(new_source)} if args.new_products_file else None)})
@@ -1088,7 +1220,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--label", action="append", required=True, help="标签 key=中文名,可多次")
     p.add_argument("--dimension", default="segment")
     p.add_argument("--rule", action="append", default=[], help="规则 key=关键词1,关键词2,可多次")
+    p.add_argument("--provider", choices=["rules", "llm"], default="rules",
+                   help="rules=关键词规则；llm=Claude 分类（需先 enrich，密钥走 ANTHROPIC_API_KEY）")
+    p.add_argument("--model", help="LLM 模型 ID；缺省读 RESEARCH_LLM_MODEL")
+    p.add_argument("--batch-size", type=int, default=25)
+    p.add_argument("--min-bullets-coverage", type=float, default=50.0,
+                   help="LLM 分类要求的最低卖点覆盖率(%)")
     p.set_defaults(func=cmd_classify)
+
+    p = sub.add_parser("enrich", help="补齐商品卖点/卖家所属地（表2）；支持 live 或人工明细文件")
+    p.add_argument("--project", required=True)
+    p.add_argument("--live", action="store_true")
+    p.add_argument("--details-file", help="离线补齐明细（ASIN、标题、卖点、卖家所属地…），亦用于上传人工修改后的表2")
+    p.add_argument("--concurrency", type=int, default=5)
+    p.set_defaults(func=cmd_enrich)
 
     p = sub.add_parser("projects", help="列出全部研究项目(跨会话恢复用)")
     p.set_defaults(func=cmd_projects)
