@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import os
+import hmac
+import ipaddress
 from functools import lru_cache
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, StrictBool
 
 from research_workflow.store import SQLiteStore
 from research_workflow.workflow import WorkflowService
@@ -32,7 +35,7 @@ class CheckpointCreate(BaseModel):
 
 
 class CheckpointResolve(BaseModel):
-    approved: bool
+    approved: StrictBool
     response: dict = Field(default_factory=dict)
 
 
@@ -42,8 +45,28 @@ def get_service() -> WorkflowService:
     return WorkflowService(SQLiteStore(db_path))
 
 
-def create_app(service: WorkflowService | None = None) -> FastAPI:
-    app = FastAPI(title="Product Research Workflow", version="0.2.0")
+def create_app(service: WorkflowService | None = None, *, api_token: str | None = None) -> FastAPI:
+    app = FastAPI(title="Product Research Workflow — local state API", version="0.2.0",
+                  description="Experimental single-operator state API. Start/resume do not execute research.")
+    token = api_token if api_token is not None else os.getenv("RESEARCH_API_TOKEN", "")
+
+    @app.middleware("http")
+    async def authorize(request, call_next):
+        if not token:
+            return JSONResponse({"detail": "Local API disabled: configure RESEARCH_API_TOKEN"}, status_code=503)
+        try:
+            local = request.client is not None and ipaddress.ip_address(request.client.host).is_loopback
+        except ValueError:
+            local = False
+        if not local:
+            return JSONResponse({"detail": "Local connections only"}, status_code=403)
+        authorization = request.headers.get("Authorization", "")
+        if not hmac.compare_digest(authorization.encode(), ("Bearer " + token).encode()):
+            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+        response = await call_next(request)
+        response.headers["X-Research-Execution-Mode"] = "state-only"
+        return response
+
     def _service() -> WorkflowService:
         return service or get_service()
 
@@ -62,6 +85,8 @@ def create_app(service: WorkflowService | None = None) -> FastAPI:
             return _service().snapshot(project_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
     @app.post("/projects/{project_id}/runs")
@@ -70,9 +95,11 @@ def create_app(service: WorkflowService | None = None) -> FastAPI:
             svc = _service()
             run = svc.create_run(project_id, body.graph_version)
             svc.start_run(run.id)
-            return svc.get_run_snapshot(run.id)
+            return {**svc.get_run_snapshot(run.id), "execution_mode": "state_only", "executor_started": False}
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/runs/{run_id}")
     def get_run(run_id: str):
@@ -80,6 +107,8 @@ def create_app(service: WorkflowService | None = None) -> FastAPI:
             return _service().get_run_snapshot(run_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/runs/{run_id}/resume")
     def resume_run(run_id: str, body: RunResume):
@@ -111,6 +140,8 @@ def create_app(service: WorkflowService | None = None) -> FastAPI:
             return svc.snapshot(project_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/projects/{project_id}/checkpoints")
     def create_checkpoint(project_id: str, body: CheckpointCreate):
@@ -119,6 +150,8 @@ def create_app(service: WorkflowService | None = None) -> FastAPI:
             return {"checkpoint_id": cp.id, "status": cp.status.value}
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/checkpoints/{checkpoint_id}/resolve")
     def resolve_checkpoint(checkpoint_id: str, body: CheckpointResolve):

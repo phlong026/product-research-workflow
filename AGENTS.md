@@ -33,8 +33,8 @@ uv pip install -e '.[dev,workflow,data]' -p .venv
 # 离线端到端 demo(不需要任何密钥;改了主流程必须跑)
 .venv/bin/python scripts/run_offline_demo.py --output runtime/offline-demo
 
-# 启动 REST API(9 个端点:projects/runs/checkpoints)
-RESEARCH_DB_PATH=runtime/api.db .venv/bin/python -m uvicorn research_workflow.api.app:app --port 8000
+# 实验性本机状态API：先安全注入 RESEARCH_API_TOKEN；不启动研究执行器
+RESEARCH_DB_PATH=runtime/api-experiment.db .venv/bin/python -m uvicorn research_workflow.api.app:app --host 127.0.0.1 --port 8000 --no-proxy-headers
 
 # Agent CLI(skill 的确定性执行器;改了 skill 协议或命令后必须跑)
 .venv/bin/python -m pytest tests/test_cli_research.py tests/test_cli_live.py -q
@@ -65,7 +65,7 @@ RESEARCH_DB_PATH=runtime/api.db .venv/bin/python -m uvicorn research_workflow.ap
 | `competition/` | T08 | 集中度/BSR 累积层级/头腰尾带/虹吸信号 |
 | `new_products/` | T09 | launch success(连续达标)与 current survival 解耦,缺月=未知 |
 | `router/` | T10 | 规则化研究分支建议,人工 confirm 后生效 |
-| `dossier/` | T11 | JSON+13 CSV+Markdown+ECharts HTML+SHA256 manifest |
+| `dossier/` | T11 | JSON+CSV+Markdown+离线SVG HTML+SHA256 manifest |
 
 ## 代码约定
 

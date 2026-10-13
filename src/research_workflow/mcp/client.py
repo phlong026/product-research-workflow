@@ -18,6 +18,10 @@ class MCPGateway:
 
     @asynccontextmanager
     async def _client(self, config: MCPServerConfig) -> AsyncIterator[Any]:
+        if not config.configured:
+            raise ValueError(f"MCP server is not configured: {config.name}")
+        if config.auth and (not config.auth.header or not config.headers()):
+            raise ValueError(f"MCP authentication is not configured: {config.name}")
         try:
             from mcp import Client, StdioServerParameters
         except ImportError as exc:  # pragma: no cover - dependency boundary
@@ -29,7 +33,7 @@ class MCPGateway:
                 args=list(config.args),
                 env=config.env or None,
             )
-            async with Client(params) as client:
+            async with Client(params, read_timeout_seconds=330) as client:
                 yield client
             return
 
@@ -38,7 +42,7 @@ class MCPGateway:
 
         headers = config.headers()
         if not headers:
-            async with Client(config.url) as client:
+            async with Client(config.url, read_timeout_seconds=120) as client:
                 yield client
             return
 
@@ -50,7 +54,7 @@ class MCPGateway:
 
         async with httpx2.AsyncClient(headers=headers) as http_client:
             transport = streamable_http_client(config.url, http_client=http_client)
-            async with Client(transport) as client:
+            async with Client(transport, read_timeout_seconds=120) as client:
                 yield client
 
     async def list_tools(self, server_name: str) -> list[str]:
@@ -58,12 +62,16 @@ class MCPGateway:
         async with self._client(config) as client:
             names: list[str] = []
             cursor = None
+            seen = set()
             while True:
                 result = await client.list_tools(cursor=cursor)
                 names.extend(tool.name for tool in result.tools)
                 cursor = getattr(result, "next_cursor", None)
                 if not cursor:
                     return names
+                if cursor in seen or len(seen) >= 100:
+                    raise ValueError("Invalid or excessive MCP tool pagination")
+                seen.add(cursor)
 
     async def call_tool(
         self,

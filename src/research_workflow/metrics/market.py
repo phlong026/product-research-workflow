@@ -200,10 +200,18 @@ def build_market_metrics(
 
     period_comparisons: list[PeriodComparisonMetric] = []
     for base_start, base_end, current_start, current_end in period_comparison_pairs or []:
-        base_months = [m for m in months if _month_key(base_start) <= _month_key(m) <= _month_key(base_end)]
-        current_months = [m for m in months if _month_key(current_start) <= _month_key(m) <= _month_key(current_end)]
-        if not base_months or not current_months:
+        base_expected = _month_range(base_start, base_end)
+        current_expected = _month_range(current_start, current_end)
+        missing_base = tuple(m for m in base_expected if m not in market_sales)
+        missing_current = tuple(m for m in current_expected if m not in market_sales)
+        if missing_base or missing_current:
+            for scope, segment in [("market", None), *[("segment", s) for s in segments]]:
+                period_comparisons.append(PeriodComparisonMetric(
+                    scope, segment, f"{base_start}..{base_end}", f"{current_start}..{current_end}",
+                    None, None, None, missing_base_months=missing_base,
+                    missing_current_months=missing_current))
             continue
+        base_months, current_months = base_expected, current_expected
         base_market = sum(market_sales[m] for m in base_months)
         current_market = sum(market_sales[m] for m in current_months)
         base_label = f"{base_start[:7]}..{base_end[:7]}"
@@ -240,3 +248,12 @@ def _default_decomposition_pairs(months: list[str]) -> list[tuple[str, str]]:
         if prior in available:
             pairs.append((prior, current))
     return pairs
+
+
+def _month_range(start: str, end: str) -> list[str]:
+    sy, sm = _month_key(start)
+    ey, em = _month_key(end)
+    first, last = sy * 12 + sm - 1, ey * 12 + em - 1
+    if first > last:
+        raise ValueError("period start must be <= end")
+    return [f"{n // 12:04d}-{n % 12 + 1:02d}" for n in range(first, last + 1)]

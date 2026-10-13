@@ -7,7 +7,7 @@ $PY $ENGINE/scripts/setup_mcp.py --codex    # 部署 + 注册 MCP 到 Codex
 $PY $ENGINE/scripts/setup_mcp.py --check    # 只体检
 ```
 
-幂等步骤:venv 依赖 → `npm install -g github:JieXi-11/SellerSprite` → 从模板生成 `.env` 与 `config/mcp.json`(不覆盖已有)→ Codex 注册(sellersprite 走 `codex mcp add` stdio;sif/xiyou/apify 写入 `~/.codex/config.toml` 的 `url` + `http_headers` 段,首次修改自动备份)。**token 为空的服务器跳过注册**;在 `.env` 填入后重跑即注册。
+幂等步骤:venv 依赖 → `npm install -g github:JieXi-11/SellerSprite` → 从模板生成 `.env` 与 `config/mcp.json`(不覆盖已有)→ Codex 注册(sellersprite 写入指定配置的 stdio 段;sif/xiyou/apify 写入 `~/.codex/config.toml` 的 `url` + `env_http_headers` / `bearer_token_env_var` 段,首次修改自动备份)。**token 为空的服务器跳过注册**;在 `.env` 填入后重跑即注册。
 
 ## Token 配置(唯一需要人工的事)
 
@@ -20,12 +20,12 @@ $PY $ENGINE/scripts/setup_mcp.py --check    # 只体检
 | `APIFY_TOKEN` | Apify | Bearer 认证 |
 | (无需 token) | SellerSprite | 本机 CDP Chrome 登录态,见下 |
 
-同一份 `.env` 同时驱动:引擎自带网关(`ingest --live` 取数)和 Codex 注册(由 setup 脚本从 `.env` 读取并写入 config.toml;token 明文存于本机 Codex 配置,不入 Git)。
+引擎网关按需读取 `.env`。setup 仅将环境变量名称写入 Codex 配置，令牌不再展开入 TOML；启动 Codex 前须安全注入对应环境变量，不能假设 Codex 会读取本项目 `.env`。新配置及备份权限为0600，旧版配置/备份可能有明文凭据，需部署者自行安全清理。
 
 ## SellerSprite 直连(月度数据主源)
 
 1. 一次性登录:启动带 CDP 的 Chrome 并登录卖家精灵(详见 `$ENGINE/docs/local/MCP_MAC_SETUP.md`),或直接 `$PY $ENGINE/scripts/run_research.py login`;
-2. 取数:`ingest --live --keyword ... --months 2025-01,2026-01`,走 `SellerSpriteConnector.product_research`(分页上限 100/页、总量约 2000,带重试),原始响应留档 `<项目目录>/raw/<月份>.json`。
+2. 取数:`ingest --live --keyword ... --months 2025-01,2026-01`,走 `SellerSpriteConnector.product_research`(分页上限 100/页、总量约 2000,带重试),业务响应和范围留档 `<项目目录>/raw/<月份>.json`，同时保存内容寻址快照（不写入请求认证头；真实响应仍须人工检查敏感字段）；分页不完整时停止，不生成完整样本结论。
 
 ## SIF / 西柚 / Apify 的用途
 

@@ -5,6 +5,8 @@ from dataclasses import asdict, is_dataclass
 from hashlib import sha256
 from html import escape
 import json
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -18,8 +20,34 @@ class ResearchDossierGenerator:
     no automatic product decision field.
     """
 
-    def generate(self, dossier: ResearchDossierInput, output_dir: str | Path) -> Path:
+    def generate(self, dossier: ResearchDossierInput, output_dir: str | Path, *,
+                 evidence_files: dict[str, Path] | None = None,
+                 approval_history: dict | None = None) -> Path:
         root = Path(output_dir)
+        if root.is_symlink() or (root.exists() and (not root.is_dir() or any(root.iterdir()))):
+            raise ValueError("导出目录必须为空或不存在;请使用新的版本目录保留旧研究资料包")
+        root.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=".dossier-", dir=root.parent))
+        try:
+            self._generate_into(dossier, staging)
+            if evidence_files:
+                evidence_dir = staging / "evidence"
+                evidence_dir.mkdir()
+                for name, source_path in evidence_files.items():
+                    if Path(name).name != name:
+                        raise ValueError("Evidence filenames must not contain paths")
+                    shutil.copyfile(source_path, evidence_dir / name)
+                self._write_json(evidence_dir / "approvals.json", approval_history or {})
+                self._write_manifest(staging)
+            if root.exists():
+                root.rmdir()  # Fails safely if another writer populated it.
+            staging.replace(root)
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging)
+        return root
+
+    def _generate_into(self, dossier: ResearchDossierInput, root: Path) -> Path:
         root.mkdir(parents=True, exist_ok=True)
         csv_dir = root / "csv"
         csv_dir.mkdir(exist_ok=True)
@@ -135,7 +163,7 @@ class ResearchDossierGenerator:
         with path.open("w", newline="", encoding="utf-8-sig") as handle:
             writer = csv.DictWriter(handle, fieldnames=fields)
             writer.writeheader()
-            writer.writerows(dict_rows)
+            writer.writerows({key: _csv_cell(value) for key, value in row.items()} for row in dict_rows)
 
     def _markdown(self, dossier: ResearchDossierInput) -> str:
         market = sorted(dossier.market_metrics.market, key=lambda row: row.month)
@@ -178,6 +206,8 @@ class ResearchDossierGenerator:
         if dossier.market_metrics.period_comparisons:
             lines.extend(["", "### 跨期窗口比较", "", "| 范围 | 对象 | 基准期 | 当前期 | 变化 | 份额变化 |", "|---|---|---|---|---:|---:|"])
             for row in dossier.market_metrics.period_comparisons:
+                if row.missing_base_months or row.missing_current_months:
+                    lines.append(f"缺月，暂停比较：基期 {list(row.missing_base_months)}；当前期 {list(row.missing_current_months)}。")
                 lines.append(
                     f"| {row.scope} | {row.segment or '-'} | {row.base_period} | {row.current_period} | "
                     f"{_fmt_pct(row.change_pct)} | {_fmt_pp(row.share_change_pp)} |"
@@ -269,6 +299,8 @@ class ResearchDossierGenerator:
                     f"- 满足项目成功定义：{s.successful_products}",
                     f"- 成功率：{s.success_rate_pct:.2f}%",
                     f"- 当前仍满足存活阈值：{s.surviving_successful_products}",
+                    f"- 已成功新品当期观测覆盖率：{_fmt_pct(s.current_observation_coverage_pct)}；未观测 {s.unknown_successful_products} 个",
+                    f"- 已观测成功新品存活率：{_fmt_pct(s.survival_rate_among_successful_pct)}（分母仅含已观测成功新品）",
                     f"- 成功新品中早期达到阈值占比：{s.early_threshold_share_among_successful_pct:.2f}%",
                 ]
             )
@@ -337,6 +369,8 @@ class ResearchDossierGenerator:
             ensure_ascii=False,
         ).replace("</", "<\\/")
         title = escape(f"{dossier.product} Research Dashboard")
+        market_svg = _svg_chart(months, [("总销量", sales)])
+        segments_svg = _svg_chart(months, [(s["name"], s["data"]) for s in segment_series])
         analysis_html = ""
         if dossier.market_analysis:
             items = "".join(
@@ -360,22 +394,15 @@ main {{ max-width: 1180px; margin: 0 auto; padding: 32px 20px 56px; }}
 .chart {{ width:100%; height:420px; }}
 .small {{ color:#667085; font-size:14px; }}
 </style>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+
 </head>
 <body><main>
 <h1>{title}</h1>
 <p class="small">研究材料由系统整理；最终商业判断由人工完成。</p>
-<div class="card"><h2>市场月销量</h2><div id="market" class="chart"></div></div>
-<div class="card"><h2>细分月销量</h2><div id="segments" class="chart"></div></div>
+<div class="card"><h2>市场月销量</h2>{market_svg}</div>
+<div class="card"><h2>细分月销量</h2>{segments_svg}</div>
 <div class="card"><h2>研究发现</h2>{analysis_html}</div>
-<script>
-const payload = {chart_payload};
-const market = echarts.init(document.getElementById('market'));
-market.setOption({{ tooltip:{{trigger:'axis'}}, xAxis:{{type:'category',data:payload.months}}, yAxis:{{type:'value'}}, series:[{{name:'总销量',type:'line',data:payload.market_sales}}] }});
-const segments = echarts.init(document.getElementById('segments'));
-segments.setOption({{ tooltip:{{trigger:'axis'}}, legend:{{type:'scroll'}}, xAxis:{{type:'category',data:payload.months}}, yAxis:{{type:'value'}}, series:payload.segment_series }});
-window.addEventListener('resize',()=>{{market.resize();segments.resize();}});
-</script>
+<script id="chart-data" type="application/json">{chart_payload}</script>
 </main></body></html>
 """
 
@@ -399,3 +426,36 @@ def _fmt_pct(value: float | None) -> str:
 
 def _fmt_pp(value: float | None) -> str:
     return "-" if value is None else f"{value:+.2f}pp"
+
+
+def _csv_cell(value: Any) -> Any:
+    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
+
+def _svg_chart(months: list[str], series: list[tuple[str, list[int]]]) -> str:
+    """Self-contained chart; no CDN, JavaScript or network needed to view evidence."""
+    if not months:
+        return "<p>暂无数据。</p>"
+    maximum = max((v for _, values in series for v in values), default=0) or 1
+    width, height = 960, 320
+    colors = ["#2563eb", "#059669", "#d97706", "#7c3aed", "#db2777"]
+    parts = ['<svg viewBox="0 0 960 360" role="img" aria-label="月销量折线图" style="width:100%;height:auto">']
+    for i in range(5):
+        y = 20 + i * 65
+        parts.append(f'<line x1="80" y1="{y}" x2="940" y2="{y}" stroke="#e5e7eb"/>')
+        parts.append(f'<text x="70" y="{y+4}" text-anchor="end" font-size="12">{maximum*(4-i)/4:,.0f}</text>')
+    for i, month in enumerate(months):
+        x = 80 + i * 860 / max(1, len(months)-1)
+        parts.append(f'<text x="{x}" y="310" text-anchor="middle" font-size="12">{escape(month)}</text>')
+    for index, (name, values) in enumerate(series):
+        color = colors[index % len(colors)]
+        points = [(80+i*860/max(1,len(months)-1), 280-value/maximum*260) for i,value in enumerate(values)]
+        points_text = " ".join(f"{x:.2f},{y:.2f}" for x,y in points)
+        parts.append(f'<polyline points="{points_text}" fill="none" stroke="{color}" stroke-width="2"/>')
+        for (x,y), month, value in zip(points, months, values):
+            parts.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="4" fill="{color}"><title>{escape(name)} {escape(month)}: {value:,}</title></circle>')
+    parts.append('</svg>')
+    parts.append('<p>' + ' · '.join(f'<span style="color:{colors[i % len(colors)]}">{escape(name)}</span>' for i,(name,_) in enumerate(series)) + '</p>')
+    return "".join(parts)

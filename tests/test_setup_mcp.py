@@ -101,8 +101,10 @@ def test_register_codex_http_servers(tmp_path: Path, monkeypatch) -> None:
     assert result["apify"].startswith("skip")
 
     text = config.read_text(encoding="utf-8")
-    assert '[mcp_servers.sif]' in text and 'secret-key = "sif-token"' in text
-    assert '[mcp_servers.xiyou]' in text and 'Authorization = "Bearer xiyou-token"' in text
+    assert '[mcp_servers.sif.env_http_headers]' in text and '"secret-key" = "SIF_MCP_TOKEN"' in text
+    assert '[mcp_servers.xiyou]' in text and 'bearer_token_env_var = "XIYOU_MCP_TOKEN"' in text
+    assert 'sif-token' not in text and 'xiyou-token' not in text
+    assert config.stat().st_mode & 0o777 == 0o600
     assert "api.example" not in text and "[mcp_servers.apify]" not in text
     assert 'model = "gpt"' in text
     assert (tmp_path / "config.toml.bak-xuanpin-setup").exists()  # 首次修改前有备份

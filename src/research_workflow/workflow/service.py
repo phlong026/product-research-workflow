@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from functools import wraps
 from uuid import uuid4
 
 from research_workflow.domain import (
@@ -16,6 +17,14 @@ from research_workflow.domain import (
 from research_workflow.domain.models import utc_now_iso
 from research_workflow.store import SQLiteStore
 from research_workflow.workflow.state import initial_state
+
+
+def _atomic(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self.store.transaction():
+            return method(self, *args, **kwargs)
+    return wrapped
 
 
 class WorkflowService:
@@ -47,8 +56,10 @@ class WorkflowService:
             "steps": self.store.list_run_steps(run_id),
         }
 
+    @_atomic
     def start_run(self, run_id: str) -> WorkflowRun:
         run = self._require_run(run_id)
+        self._guard_pending_review(run.project_id)
         if run.status in {RunStatus.RUNNING, RunStatus.COMPLETED}:
             return run
         now = utc_now_iso()
@@ -85,6 +96,8 @@ class WorkflowService:
         completed = list(state.get("completed_steps", []))
         if status is StepStatus.COMPLETED and step_key not in completed:
             completed.append(step_key)
+        if status is not StepStatus.COMPLETED and step_key in completed:
+            completed.remove(step_key)
         state["completed_steps"] = completed
         if output_ref:
             refs = dict(state.get("data_refs", {}))
@@ -117,8 +130,12 @@ class WorkflowService:
     def pause_run(self, run_id: str, step_key: str) -> WorkflowRun:
         return self.mark_run_step(run_id, step_key, StepStatus.WAITING_HUMAN)
 
+    @_atomic
     def resume_run(self, run_id: str, *, resume_key: str | None = None) -> WorkflowRun:
         run = self._require_run(run_id)
+        self._guard_pending_review(run.project_id)
+        if run.status is RunStatus.FAILED:
+            raise ValueError("Failed run must be retried as a new run")
         if resume_key:
             if not self.store.record_resume_key(run_id, resume_key, utc_now_iso()):
                 return self._require_run(run_id)
@@ -183,8 +200,10 @@ class WorkflowService:
         )
         return project
 
+    @_atomic
     def start(self, project_id: str) -> None:
         project = self._require_project(project_id)
+        self._guard_pending_review(project_id)
         if project.status not in {ProjectStatus.DRAFT, ProjectStatus.PAUSED}:
             return
         now = utc_now_iso()
@@ -193,6 +212,7 @@ class WorkflowService:
         state["current_step"] = "research_started"
         self.store.put_state(project_id, state)
 
+    @_atomic
     def set_step(
         self,
         project_id: str,
@@ -216,10 +236,13 @@ class WorkflowService:
         completed = list(state.get("completed_steps", []))
         if status is StepStatus.COMPLETED and step_key not in completed:
             completed.append(step_key)
+        if status is not StepStatus.COMPLETED and step_key in completed:
+            completed.remove(step_key)
         state["completed_steps"] = completed
         self.store.put_state(project_id, state)
         return step
 
+    @_atomic
     def request_human_checkpoint(
         self,
         project_id: str,
@@ -228,6 +251,15 @@ class WorkflowService:
         payload: dict,
     ) -> HumanCheckpoint:
         self._require_project(project_id)
+        state = self.store.get_state(project_id)
+        previous = state.get("pending_checkpoint_id")
+        if previous:
+            self.store.resolve_checkpoint(previous, CheckpointStatus.RESOLVED,
+                                          {"superseded": True}, utc_now_iso())
+        approvals = dict(state.get("approved_checkpoints", {}))
+        approvals.pop(step_key, None)
+        state["approved_checkpoints"] = approvals
+        self.store.put_state(project_id, state)
         cp = HumanCheckpoint(
             id=str(uuid4()),
             project_id=project_id,
@@ -244,6 +276,7 @@ class WorkflowService:
         self.store.put_state(project_id, state)
         return cp
 
+    @_atomic
     def resolve_human_checkpoint(
         self,
         checkpoint_id: str,
@@ -251,9 +284,13 @@ class WorkflowService:
         approved: bool,
         response: dict | None = None,
     ) -> HumanCheckpoint:
+        if type(approved) is not bool:
+            raise ValueError("approved must be an explicit boolean")
         cp = self.store.get_checkpoint(checkpoint_id)
         if cp is None:
             raise KeyError(f"Unknown checkpoint: {checkpoint_id}")
+        if self.store.get_state(cp.project_id).get("pending_checkpoint_id") != cp.id:
+            raise ValueError("Checkpoint is no longer current; inspect status")
         if cp.status is not CheckpointStatus.PENDING:
             raise ValueError("Checkpoint is already resolved")
         status = CheckpointStatus.APPROVED if approved else CheckpointStatus.REJECTED
@@ -266,6 +303,12 @@ class WorkflowService:
         state = self.store.get_state(cp.project_id)
         state["pending_checkpoint_id"] = None
         state["human_response"] = response or {}
+        approvals = dict(state.get("approved_checkpoints", {}))
+        if approved:
+            approvals[cp.step_key] = cp.id
+        else:
+            approvals.pop(cp.step_key, None)
+        state["approved_checkpoints"] = approvals
         self.store.put_state(cp.project_id, state)
         if approved:
             self.set_step(cp.project_id, cp.step_key, StepStatus.COMPLETED)
@@ -274,6 +317,31 @@ class WorkflowService:
             self.set_step(cp.project_id, cp.step_key, StepStatus.PENDING)
             self.store.update_project_status(cp.project_id, ProjectStatus.PAUSED, utc_now_iso())
         return resolved
+
+    def _guard_pending_review(self, project_id: str) -> None:
+        if self.store.get_state(project_id).get("pending_checkpoint_id"):
+            raise ValueError("Resolve the current human checkpoint before changing execution status")
+
+    @_atomic
+    def invalidate_steps(self, project_id: str, step_keys: list[str]) -> None:
+        """Retain checkpoint audit history while making derived results unusable."""
+        self._require_project(project_id)
+        state = self.store.get_state(project_id)
+        pending = state.get("pending_checkpoint_id")
+        if pending:
+            cp = self.store.get_checkpoint(pending)
+            if cp and cp.step_key in step_keys:
+                self.store.resolve_checkpoint(cp.id, CheckpointStatus.RESOLVED,
+                                              {"superseded": True}, utc_now_iso())
+                state["pending_checkpoint_id"] = None
+        state["completed_steps"] = [s for s in state.get("completed_steps", []) if s not in step_keys]
+        state["approved_checkpoints"] = {k: v for k, v in state.get("approved_checkpoints", {}).items()
+                                         if k not in step_keys}
+        state["human_response"] = None
+        self.store.put_state(project_id, state)
+        for key in step_keys:
+            self.set_step(project_id, key, StepStatus.PENDING)
+        self.store.update_project_status(project_id, ProjectStatus.PAUSED, utc_now_iso())
 
     def snapshot(self, project_id: str) -> dict:
         project = self._require_project(project_id)

@@ -13,9 +13,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import dataclasses
+import io
+from contextlib import redirect_stdout
 import json
 import os
 import re
+import sqlite3
+import shutil
+import tempfile
 import sys
 from hashlib import sha256
 from pathlib import Path
@@ -43,6 +48,7 @@ from research_workflow.competition.models import CompetitionMetricsResult
 from research_workflow.data import MonthlyBSRConfig, build_monthly_top
 from research_workflow.data.io import read_tabular_rows
 from research_workflow.data.models import BSRRecord, MonthlyBSRResult
+from research_workflow.data.bsr_pipeline import validate_month, _to_int
 from research_workflow.connectors.base import ConnectorError
 from research_workflow.connectors.sellersprite import SellerSpriteConnector
 from research_workflow.domain import ProjectStatus, StepStatus
@@ -105,7 +111,9 @@ def _emit(payload: dict[str, Any]) -> None:
 
 
 def _service(args: argparse.Namespace) -> WorkflowService:
-    return WorkflowService(SQLiteStore(args.db))
+    if not hasattr(args, "_workflow_service"):
+        args._workflow_service = WorkflowService(SQLiteStore(args.db))
+    return args._workflow_service
 
 
 def _project_dir(args: argparse.Namespace, project_id: str) -> Path:
@@ -120,15 +128,39 @@ def _load_json(path: Path) -> Any:
 
 def _save_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
-    )
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    temporary.replace(path)
 
 
 def _require_file(path: Path, message: str) -> Any:
     if not path.exists():
-        raise SystemExit(_emit({"error": message, "missing": str(path)}) or 1)
+        raise ValueError(f"{message}: {path}")
     return _load_json(path)
+
+
+def _snapshot_source(pdir: Path, path: Path) -> Path:
+    raw = path.read_bytes()
+    dest = pdir / "raw" / (sha256(raw).hexdigest() + path.suffix.lower())
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        if _sha256_file(dest) != sha256(raw).hexdigest():
+            raise ValueError("原始快照损坏;请保留现场并恢复正确快照后重试")
+    else:
+        with tempfile.NamedTemporaryFile(dir=dest.parent, delete=False) as handle:
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+            temporary = Path(handle.name)
+        temporary.replace(dest)
+    return dest
 
 
 def _sha256_file(path: Path) -> str:
@@ -192,6 +224,47 @@ def _parse_kv(items: list[str], what: str) -> dict[str, str]:
     return parsed
 
 
+STAGES = ["collect_bsr", "data_review", "enrich_asins", "classify", "classification_review",
+          "apply_classification_review", "market_metrics", "market_analysis", "competition_metrics",
+          "new_product_analysis", "research_route", "route_review", "research_route_review",
+          "apply_route_review", "dossier"]
+DERIVED_FILES = {"classify": ["classification.json"], "market_metrics": ["market_metrics.json",
+                 "market_analysis.json", "competition.json", "new_products.json", "route_plan.json",
+                 "analysis_context.json"]}
+
+
+def _hashes(pdir: Path, names: list[str]) -> dict[str, str | None]:
+    return {name: _sha256_file(pdir / name) if (pdir / name).is_file() else None for name in names}
+
+
+def _verify_hashes(pdir: Path, hashes: dict[str, str | None]) -> None:
+    if not hashes:
+        raise ValueError("旧检查点未绑定工件;请重新执行对应阶段并人工复核")
+    for name, digest in hashes.items():
+        actual = _sha256_file(pdir / name) if (pdir / name).is_file() else None
+        if Path(name).name != name or actual != digest:
+            raise ValueError(f"已审工件发生变化: {name};请重跑对应阶段并人工复核")
+
+
+def _require_approved(svc: WorkflowService, pid: str, pdir: Path, steps: list[str]) -> None:
+    state = svc.store.get_state(pid)
+    for step in steps:
+        cp_id = state.get("approved_checkpoints", {}).get(step)
+        cp = svc.store.get_checkpoint(cp_id) if cp_id else None
+        if cp is None or cp.status.value != "approved" or step not in state.get("completed_steps", []):
+            raise ValueError(f"{step} 尚未人工确认;请先检查 status 并 resolve 当前检查点")
+        _verify_hashes(pdir, (cp.response or {}).get("artifact_hashes", {}))
+
+
+def _invalidate(svc: WorkflowService, pid: str, pdir: Path, start: str) -> None:
+    stages = STAGES[STAGES.index(start):]
+    svc.invalidate_steps(pid, stages)
+    for stage, names in DERIVED_FILES.items():
+        if stage in stages:
+            for name in names:
+                (pdir / name).unlink(missing_ok=True)
+
+
 # --- 子命令 ---
 
 def cmd_init(args: argparse.Namespace) -> None:
@@ -247,7 +320,15 @@ def _persist_ingest(
             "duplicate_title_rows_removed": result.quality.duplicate_title_rows_removed,
             "warnings": result.quality.warning_count,
         }
+    replaced_months = {result.month for result in results}
+    all_sources = {key: value for key, value in all_sources.items()
+                   if key.split(":", 1)[0] not in replaced_months}
     all_sources.update(sources)
+    if not results or any(not result.records for result in results):
+        raise ValueError("每个导入月份必须有有效数据;空数据不能作为零销量市场进入分析")
+    if any(result.quality.invalid_sales_rows for result in results):
+        raise ValueError("存在缺失/非法销量;请修正源数据后重新导入，不能将缺失视为零销量")
+    _invalidate(svc, args.project, pdir, "collect_bsr")
 
     _save_json(pdir / "records.json", by_month)
     _save_json(pdir / "quality.json", quality)
@@ -257,7 +338,8 @@ def _persist_ingest(
         args.project,
         "data_review",
         "请检查清洗后的月度数据(行数、去重、质量警告),确认后继续。",
-        {"months": summary, "sources": list(all_sources.values()), "source_mode": source_mode},
+        {"months": summary, "sources": list(all_sources.values()), "source_mode": source_mode,
+         "artifact_hashes": _hashes(pdir, ["records.json", "quality.json", "sources.json"])},
     )
     _emit(
         {
@@ -273,12 +355,21 @@ def _persist_ingest(
 
 
 async def _fetch_live(args: argparse.Namespace, pdir: Path) -> tuple[list[MonthlyBSRResult], dict[str, Any]]:
+    months = list(dict.fromkeys(m.strip() for m in args.months.split(",") if m.strip()))
+    if not months or len(months) > 60:
+        raise ValueError("--months 必须提供 1 至 60 个有效月份")
+    for month in months:
+        validate_month(month)
+    if not 1 <= args.max_pages <= 20 or not 1 <= args.page_size <= 100 or args.top_n < 1:
+        raise ValueError("分页上限为 20，每页 1 至 100，top-n 必须大于零")
     _load_dotenv(ROOT / ".env")
     gateway = _build_gateway(ROOT / "config" / "mcp.json")
     connector = SellerSpriteConnector(gateway)
     await connector.validate()
     try:
-        await connector.session_status()
+        session = await connector.session_status()
+        if not isinstance(session, dict) or not (session.get("ready") is True or session.get("loggedIn") is True):
+            raise ConnectorError("SellerSprite session is not ready; login locally first")
     except ConnectorError as exc:
         raise SystemExit(
             _emit(
@@ -289,7 +380,6 @@ async def _fetch_live(args: argparse.Namespace, pdir: Path) -> tuple[list[Monthl
             )
             or 1
         )
-    months = [m.strip() for m in args.months.split(",") if m.strip()]
     results: list[MonthlyBSRResult] = []
     sources: dict[str, Any] = {}
     raw_dir = pdir / "raw"
@@ -304,15 +394,17 @@ async def _fetch_live(args: argparse.Namespace, pdir: Path) -> tuple[list[Monthl
         )
         rows = response.data.get("items", []) if isinstance(response.data, dict) else []
         raw_path = raw_dir / f"{month}.json"
-        _save_json(raw_path, {"provider": "sellersprite", "operation": "product_research", "rows": rows})
+        _save_json(raw_path, {"provider": "sellersprite", "operation": "product_research", "rows": rows,
+                              "response_pages": response.raw, "request_scope": {"month": month, "marketplace": args.marketplace, "keyword": args.keyword}})
         results.append(build_monthly_top(rows, month, MonthlyBSRConfig(top_n=args.top_n)))
+        snapshot = _snapshot_source(pdir, raw_path)
         artifact_id = f"{month}:sellersprite"
         sources[artifact_id] = {
             "artifact_id": artifact_id,
             "name": f"sellersprite product_research {month}",
             "kind": "mcp",
-            "source": "sellersprite",
-            "sha256": _sha256_file(raw_path),
+            "source": snapshot.relative_to(pdir).as_posix(),
+            "sha256": _sha256_file(snapshot),
         }
     if results and all(result.stats.parsed_rows == 0 for result in results):
         raise SystemExit(
@@ -337,8 +429,12 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     if args.live:
         if not args.months:
             raise SystemExit(_emit({"error": "live 模式必须用 --months 指定月份,如 2025-01,2026-01"}) or 1)
-        if not args.marketplace:
-            args.marketplace = project.marketplace
+        if args.marketplace and args.marketplace.upper() != project.marketplace:
+            raise ValueError("live 站点必须与项目站点一致;其它站点请新建项目")
+        args.marketplace = project.marketplace
+        args.keyword = args.keyword or project.primary_keyword
+        if not args.keyword:
+            raise ValueError("live 模式必须提供 --keyword 或项目 primary_keyword，避免无范围取数")
         results, sources = asyncio.run(_fetch_live(args, pdir))
         _persist_ingest(svc, args, pdir, results, sources, source_mode="mcp:sellersprite")
         return
@@ -354,15 +450,16 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         if not path.exists():
             raise KeyError(f"文件不存在: {file_name}")
         month = _resolve_month(args, path)
-        rows = read_tabular_rows(path)
+        snapshot = _snapshot_source(pdir, path)
+        rows = read_tabular_rows(snapshot)
         results.append(build_monthly_top(rows, month, MonthlyBSRConfig(top_n=args.top_n)))
         artifact_id = f"{month}:{path.name}"
         sources[artifact_id] = {
             "artifact_id": artifact_id,
             "name": path.name,
             "kind": path.suffix.lstrip(".") or "file",
-            "source": str(path.resolve()),
-            "sha256": _sha256_file(path),
+            "source": snapshot.relative_to(pdir).as_posix(),
+            "sha256": _sha256_file(snapshot),
         }
     _persist_ingest(svc, args, pdir, results, sources, source_mode="file")
 
@@ -370,9 +467,13 @@ def cmd_ingest(args: argparse.Namespace) -> None:
 def cmd_login(args: argparse.Namespace) -> None:
     _load_dotenv(ROOT / ".env")
     connector = SellerSpriteConnector(_build_gateway(ROOT / "config" / "mcp.json"))
-    _emit({"hint": "请在弹出的 CDP Chrome 中登录卖家精灵;等待时间最长 " + str(args.wait) + " 秒"})
-    result = asyncio.run(connector.validate() and connector.login(wait_seconds=args.wait))
-    _emit({"login": "completed", "detail": str(result)[:2000]})
+    async def login():
+        await connector.validate()
+        return await connector.login(wait_seconds=args.wait)
+    result = asyncio.run(login())
+    _emit({"login": "completed" if result.get("ready") is True else "pending",
+           "ready": result.get("ready") is True,
+           "next": "ingest --live" if result.get("ready") is True else "请在本机浏览器完成登录后重新检查"})
 
 
 def cmd_classify(args: argparse.Namespace) -> None:
@@ -380,6 +481,7 @@ def cmd_classify(args: argparse.Namespace) -> None:
     if svc.store.get_project(args.project) is None:
         raise KeyError(f"Unknown project: {args.project}")
     pdir = _project_dir(args, args.project)
+    _require_approved(svc, args.project, pdir, ["data_review"])
     records = _load_records(pdir)
 
     profiles: dict[str, ASINProfile] = {}
@@ -396,7 +498,7 @@ def cmd_classify(args: argparse.Namespace) -> None:
             ),
         )
     # 离线模式:画像直接来自 BSR 行,跳过 MCP 补全(实连见 references/live-mcp.md)。
-    svc.set_step(args.project, "enrich_asins", StepStatus.SKIPPED)
+    # Mark skipped only after successful classification and invalidation below.
 
     labels = [
         ClassificationLabel(key=key, name=name)
@@ -410,9 +512,14 @@ def cmd_classify(args: argparse.Namespace) -> None:
     service = ClassificationService(RuleClassificationProvider(rules))
     batch = asyncio.run(service.classify(schema, list(profiles.values())))
 
+    _invalidate(svc, args.project, pdir, "enrich_asins")
+    svc.set_step(args.project, "enrich_asins", StepStatus.SKIPPED)
     _save_json(pdir / "classification.json", {"schema": schema.canonical_payload(), "batch": batch.to_dict()})
     svc.set_step(args.project, "classify", StepStatus.COMPLETED, output_ref="classification.json")
-    checkpoint = service.request_review_checkpoint(svc, schema, batch)
+    checkpoint = svc.request_human_checkpoint(args.project, "classification_review",
+        "请检查规则分类结果；可修改后确认继续。当前未调用 LLM，未执行 ASIN 补全。",
+        {"schema": schema.canonical_payload(), "classification": batch.to_dict(),
+         "artifact_hashes": _hashes(pdir, ["classification.json"])})
 
     counts: dict[str, int] = {}
     for row in batch.rows.values():
@@ -421,6 +528,8 @@ def cmd_classify(args: argparse.Namespace) -> None:
         {
             "project_id": args.project,
             "classification_version": batch.version,
+            "classification_provider": "rules",
+            "enrichment": "skipped",
             "label_counts": counts,
             "total_asins": len(batch.rows),
             "checkpoint_id": checkpoint.id,
@@ -450,11 +559,11 @@ def cmd_status(args: argparse.Namespace) -> None:
     completed = set(snapshot["state"].get("completed_steps", []))
     if pending:
         next_action = "resolve"
-    elif "collect_bsr" not in completed:
+    elif "data_review" not in completed:
         next_action = "ingest"
-    elif "classify" not in completed:
+    elif "classification_review" not in completed:
         next_action = "classify"
-    elif "market_metrics" not in completed:
+    elif "research_route_review" not in completed:
         next_action = "analyze"
     elif "dossier" not in completed:
         next_action = "dossier"
@@ -479,11 +588,15 @@ def cmd_resolve(args: argparse.Namespace) -> None:
     checkpoint = svc.store.get_checkpoint(args.checkpoint)
     if checkpoint is None or checkpoint.project_id != args.project:
         raise KeyError(f"Unknown checkpoint: {args.checkpoint}")
+    if svc.store.get_state(args.project).get("pending_checkpoint_id") != checkpoint.id:
+        raise ValueError("检查点已过期;先 status 查看当前待确认项")
     if checkpoint.status.value != "pending":
         raise ValueError(f"Checkpoint 已裁决: {checkpoint.status.value}")
 
     pdir = _project_dir(args, args.project)
     response: dict[str, Any] = {"approved": args.approve}
+    if args.approve:
+        _verify_hashes(pdir, checkpoint.payload.get("artifact_hashes", {}))
 
     if args.approve and checkpoint.step_key == "classification_review":
         envelope = _require_file(pdir / "classification.json", "缺少 classification.json;先运行 classify")
@@ -511,6 +624,8 @@ def cmd_resolve(args: argparse.Namespace) -> None:
         _save_json(pdir / "route_plan.json", plan.to_dict())
         svc.set_step(args.project, "apply_route_review", StepStatus.COMPLETED)
 
+    if args.approve:
+        response["artifact_hashes"] = _hashes(pdir, list(checkpoint.payload["artifact_hashes"]))
     svc.resolve_human_checkpoint(args.checkpoint, approved=args.approve, response=response)
 
     next_action = {
@@ -520,7 +635,7 @@ def cmd_resolve(args: argparse.Namespace) -> None:
         "research_route_review": "dossier",
     }.get(checkpoint.step_key, "status")
     if not args.approve:
-        next_action = f"人工驳回({checkpoint.step_key});修正后重新执行对应阶段或再次 resolve"
+        next_action = {"data_review": "ingest", "classification_review": "classify"}.get(checkpoint.step_key, "analyze")
     _emit(
         {
             "project_id": args.project,
@@ -539,6 +654,7 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     if svc.store.get_project(args.project) is None:
         raise KeyError(f"Unknown project: {args.project}")
     pdir = _project_dir(args, args.project)
+    _require_approved(svc, args.project, pdir, ["data_review", "classification_review"])
     envelope = _require_file(
         pdir / "classification.json", "缺少 classification.json;先运行 classify 并通过人工确认"
     )
@@ -560,16 +676,18 @@ def cmd_analyze(args: argparse.Namespace) -> None:
 
     new_products = None
     if args.new_products_file:
-        rows = read_tabular_rows(args.new_products_file)
+        new_source = _snapshot_source(pdir, Path(args.new_products_file))
+        rows = read_tabular_rows(new_source)
         snapshots = [
             NewProductSnapshot(
                 asin=str(_col(row, "ASIN", "asin")).strip().upper(),
                 month=str(_col(row, "月份", "month")),
-                monthly_sales=int(float(str(_col(row, "月销量", "monthly_sales", "销量", "sales")).replace(",", ""))),
+                monthly_sales=_sales(_col(row, "月销量", "monthly_sales", "销量", "sales")),
                 launch_date=_col(row, "上架时间", "launch_date") or None,
                 seller_region=str(_col(row, "卖家所属地", "seller_region") or "UNKNOWN"),
                 account_type=str(_col(row, "账号类型", "account_type") or "UNKNOWN"),
                 segment=str(_col(row, "细分", "segment") or "unknown"),
+                eligible=_eligible(_col(row, "eligible", "纳入研究")),
             )
             for row in rows
             if str(_col(row, "ASIN", "asin")).strip()
@@ -586,12 +704,20 @@ def cmd_analyze(args: argparse.Namespace) -> None:
 
     route_plan = ResearchRouter().suggest(market, competition, new_products)
 
+    _invalidate(svc, args.project, pdir, "market_metrics")
     _save_json(pdir / "market_metrics.json", market.to_dict())
     _save_json(pdir / "market_analysis.json", analysis.to_dict())
     _save_json(pdir / "competition.json", competition.to_dict())
     if new_products is not None:
         _save_json(pdir / "new_products.json", new_products.to_dict())
     _save_json(pdir / "route_plan.json", route_plan.to_dict())
+    _save_json(pdir / "analysis_context.json", {
+        "classification_version": envelope["batch"]["version"],
+        "classification_provider": "rules", "analysis_provider": analysis.provider,
+        "enrichment": "skipped", "pairs": pairs, "periods": periods,
+        "new_products_source": ({"artifact_id": "new-products", "name": Path(args.new_products_file).name,
+            "kind": new_source.suffix.lstrip("."), "source": new_source.relative_to(pdir).as_posix(),
+            "sha256": _sha256_file(new_source)} if args.new_products_file else None)})
 
     svc.set_step(args.project, "market_metrics", StepStatus.COMPLETED, output_ref="market_metrics.json")
     svc.set_step(args.project, "market_analysis", StepStatus.COMPLETED, output_ref="market_analysis.json")
@@ -602,7 +728,10 @@ def cmd_analyze(args: argparse.Namespace) -> None:
         StepStatus.COMPLETED if new_products is not None else StepStatus.SKIPPED,
     )
     svc.set_step(args.project, "research_route", StepStatus.COMPLETED, output_ref="route_plan.json")
-    checkpoint = ResearchRouter().request_human_checkpoint(svc, args.project, route_plan)
+    checkpoint = svc.request_human_checkpoint(args.project, "research_route_review",
+        "请确认下一步研究分支。确认只登记研究路线，不自动执行支线。",
+        {**route_plan.to_dict(), "artifact_hashes": _hashes(pdir, ["market_metrics.json",
+            "market_analysis.json", "competition.json", "new_products.json", "route_plan.json", "analysis_context.json"])})
 
     latest = market.market[-1] if market.market else None
     _emit(
@@ -620,6 +749,22 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     )
 
 
+def _sales(value: Any) -> int:
+    result = _to_int(value, None)
+    if result is None:
+        raise ValueError("新品月销量必须是非负整数，缺失不得视为零")
+    return result
+
+
+def _eligible(value: Any) -> bool:
+    normalized = str(value).strip().casefold()
+    if normalized in {"", "true", "1", "yes", "是"}:
+        return True
+    if normalized in {"false", "0", "no", "否"}:
+        return False
+    raise ValueError("eligible 必须为 true/false、1/0 或 是/否")
+
+
 def _col(row: dict[str, Any], *names: str) -> Any:
     for name in names:
         value = row.get(name)
@@ -634,6 +779,7 @@ def cmd_dossier(args: argparse.Namespace) -> None:
     if project is None:
         raise KeyError(f"Unknown project: {args.project}")
     pdir = _project_dir(args, args.project)
+    _require_approved(svc, args.project, pdir, ["data_review", "classification_review", "research_route_review"])
     plan_data = _require_file(pdir / "route_plan.json", "缺少 route_plan.json;先运行 analyze")
     if not plan_data.get("human_confirmed"):
         raise ValueError("研究路线尚未人工确认;先 resolve route_review 检查点")
@@ -647,7 +793,17 @@ def cmd_dossier(args: argparse.Namespace) -> None:
         else None
     )
     route_plan = rebuild(ResearchRoutePlan, plan_data)
-    sources = [rebuild(SourceArtifact, item) for item in _load_json(pdir / "sources.json").values()]
+    source_items = list(_load_json(pdir / "sources.json").values())
+    context = _load_json(pdir / "analysis_context.json")
+    if context.get("new_products_source"):
+        source_items.append(context["new_products_source"])
+    sources = [rebuild(SourceArtifact, item) for item in source_items]
+    for source in sources:
+        source_path = Path(source.source)
+        if not source_path.is_absolute():
+            source_path = pdir / source_path
+        if not source_path.is_file() or _sha256_file(source_path) != source.sha256:
+            raise ValueError(f"原始资料缺失或哈希不匹配: {source.artifact_id};请重新导入")
 
     quality = _load_json(pdir / "quality.json")
     data_quality = [
@@ -660,11 +816,17 @@ def cmd_dossier(args: argparse.Namespace) -> None:
         }
         for month, item in sorted(quality.items())
     ]
-    missing_evidence: list[str] = []
+    missing_evidence: list[str] = ["当前采用规则分类与确定性模板解释，未调用 LLM", "当前 CLI 未执行 ASIN 补全", "研究路线确认仅登记，支线尚未自动执行"]
     if new_products is None:
         missing_evidence.append("未提供新品跟踪表(new_products),T09 新品结论缺失")
 
     output = Path(args.output)
+    approvals = svc.store.get_state(args.project).get("approved_checkpoints", {})
+    evidence_names = ["records.json", "quality.json", "sources.json", "classification.json", "analysis_context.json",
+                      "market_metrics.json", "market_analysis.json", "competition.json", "new_products.json", "route_plan.json"]
+    evidence_files = {name: pdir / name for name in evidence_names if (pdir / name).is_file()}
+    evidence_files.update({source.sha256 + Path(source.source).suffix: (Path(source.source) if Path(source.source).is_absolute() else pdir / source.source) for source in sources})
+    approval_history = {key: dataclasses.asdict(svc.store.get_checkpoint(value)) for key,value in approvals.items()}
     ResearchDossierGenerator().generate(
         ResearchDossierInput(
             project_id=project.id,
@@ -675,12 +837,12 @@ def cmd_dossier(args: argparse.Namespace) -> None:
             competition_metrics=competition,
             new_product_analysis=new_products,
             route_plan=route_plan,
-            source_artifacts=sources,
+            source_artifacts=[dataclasses.replace(source, source="evidence/" + source.sha256 + Path(source.source).suffix) for source in sources],
             data_quality=data_quality,
             missing_evidence=missing_evidence,
-            metadata={"classification_version": _load_json(pdir / "classification.json")["batch"]["version"]},
+            metadata={**context, "approved_checkpoints": svc.store.get_state(args.project).get("approved_checkpoints", {})},
         ),
-        output,
+        output, evidence_files=evidence_files, approval_history=approval_history,
     )
     svc.set_step(args.project, "dossier", StepStatus.COMPLETED, output_ref=str(output))
     svc.store.update_project_status(args.project, ProjectStatus.COMPLETED, utc_now_iso())
@@ -790,13 +952,43 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _restore_files(backups: dict[Path, bytes]) -> None:
+    for path, raw in backups.items():
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
+            handle.write(raw)
+            temporary = Path(handle.name)
+        temporary.replace(path)
+
+
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    backups: dict[Path, bytes] = {}
     try:
-        args.func(args)
-    except (KeyError, ValueError, FileNotFoundError) as exc:
+        if args.command == "login":
+            args.func(args)
+            return
+        svc = _service(args)
+        # One DB write transaction serializes a complete CLI command across processes,
+        # including reviewed file reads. Status API is experimental; do not share roots.
+        output = io.StringIO()
+        with redirect_stdout(output):
+            with svc.store.transaction(on_rollback=lambda: _restore_files(backups)):
+                if args.command == "resolve":
+                    pdir = Path(args.root) / args.project
+                    backups = {p: p.read_bytes() for p in [pdir / "classification.json", pdir / "route_plan.json"] if p.is_file()}
+                args.func(args)
+        print(output.getvalue(), end="")
+    except SystemExit:
+        if "output" in locals():
+            print(output.getvalue(), end="")
+        raise
+    except (KeyError, ValueError, OSError, sqlite3.Error, ConnectorError) as exc:
         _emit({"error": str(exc).strip('"'), "command": args.command})
         sys.exit(1)
+    finally:
+        if hasattr(args, "_workflow_service"):
+            args._workflow_service.store.close()
+
 
 
 if __name__ == "__main__":

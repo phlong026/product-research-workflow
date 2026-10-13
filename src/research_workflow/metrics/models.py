@@ -62,12 +62,14 @@ class PeriodComparisonMetric:
     segment: str | None
     base_period: str
     current_period: str
-    base_sales: int
-    current_sales: int
+    base_sales: int | None
+    current_sales: int | None
     change_pct: float | None
     base_share_pct: float | None = None
     current_share_pct: float | None = None
     share_change_pp: float | None = None
+    missing_base_months: tuple[str, ...] = ()
+    missing_current_months: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)

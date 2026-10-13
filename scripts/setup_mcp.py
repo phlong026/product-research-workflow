@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import sys
 from pathlib import Path
 
@@ -56,6 +57,17 @@ def build_http_headers(header: str, scheme: str, token: str) -> dict[str, str]:
     return {header or "Authorization": value}
 
 
+def toml_section_http_env(name: str, url: str, header: str, scheme: str, token_env: str) -> str:
+    lines = [f"[mcp_servers.{name}]", f"url = {_toml_quote(url)}"]
+    if header.casefold() == "authorization" and scheme.casefold() == "bearer":
+        lines.append(f"bearer_token_env_var = {_toml_quote(token_env)}")
+    elif not scheme:
+        lines.extend([f"[mcp_servers.{name}.env_http_headers]", f"{_toml_quote(header)} = {_toml_quote(token_env)}"])
+    else:
+        raise ValueError("Unsupported auth scheme; configure a full-header environment variable manually")
+    return "\n".join(lines) + "\n"
+
+
 def toml_section_http(name: str, url: str, headers: dict[str, str]) -> str:
     lines = [f"[mcp_servers.{name}]", f"url = {_toml_quote(url)}"]
     if headers:
@@ -82,7 +94,10 @@ def ensure_env_files(engine: Path) -> dict[str, bool]:
         (engine / "config" / "mcp.example.json", engine / "config" / "mcp.json"),
     ):
         if not target.exists() and template.exists():
-            target.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("x", encoding="utf-8") as handle:
+                target.chmod(0o600)
+                handle.write(template.read_text(encoding="utf-8"))
             created[str(target.relative_to(engine))] = True
         else:
             created[str(target.relative_to(engine))] = False
@@ -96,39 +111,37 @@ def registered_names(config_path: Path) -> set[str]:
     return set(re.findall(r"(?m)^\[mcp_servers\.([^\].]+)\]", text))
 
 
+def _write_config_section(config_path: Path, name: str, section: str) -> None:
+    text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    backup = config_path.with_suffix(".toml.bak-xuanpin-setup")
+    if config_path.exists() and not backup.exists():
+        with backup.open("x", encoding="utf-8") as handle:
+            backup.chmod(0o600)
+            handle.write(text)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=config_path.parent, delete=False) as handle:
+        handle.write(replace_toml_section(text, name, section))
+        temporary = Path(handle.name)
+    temporary.chmod(0o600)
+    temporary.replace(config_path)
+
+
 def register_codex(engine: Path, config_path: Path) -> dict[str, str]:
-    """注册 4 个 MCP 到 Codex;sellersprite 走官方 CLI,HTTP 三个走 TOML 段替换。"""
+    """注册 4 个 MCP 到 Codex;统一写入显式指定的 TOML，避免改动隐含的全局配置。"""
     result: dict[str, str] = {}
-    env = parse_env_file(engine / ".env")
+    env = {**parse_env_file(engine / ".env"), **os.environ}
+    config_path.parent.mkdir(parents=True, exist_ok=True)
     existing = registered_names(config_path)
 
     if shutil.which("codex") is None:
         result["sellersprite"] = "fail: 未找到 codex CLI"
+    elif "sellersprite" in existing:
+        result["sellersprite"] = "skip: 指定配置中已注册"
     else:
-        probe = subprocess.run(
-            ["codex", "mcp", "get", "sellersprite"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if probe.returncode == 0:
-            result["sellersprite"] = "skip: 已注册(codex mcp get sellersprite)"
-        else:
-            cdp = env.get("SELLERSPRITE_CDP_URL", "http://127.0.0.1:9222")
-            added = subprocess.run(
-                [
-                    "codex", "mcp", "add", "sellersprite",
-                    "--env", f"SELLERSPRITE_CDP_URL={cdp}",
-                    "--", "sellersprite-mcp",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            result["sellersprite"] = (
-                "ok: 已注册(stdio)" if added.returncode == 0
-                else f"fail: {added.stderr.strip()[:200] or added.stdout.strip()[:200]}"
-            )
+        cdp = env.get("SELLERSPRITE_CDP_URL", "http://127.0.0.1:9222")
+        section = ('[mcp_servers.sellersprite]\ncommand = "sellersprite-mcp"\n'
+                   '[mcp_servers.sellersprite.env]\nSELLERSPRITE_CDP_URL = ' + _toml_quote(cdp) + '\n')
+        _write_config_section(config_path, "sellersprite", section)
+        result["sellersprite"] = "ok: 已注册到指定配置(stdio)"
 
     for name, url_key, header_key, scheme_key, token_key in HTTP_SERVERS:
         url = env.get(url_key, "")
@@ -139,18 +152,11 @@ def register_codex(engine: Path, config_path: Path) -> dict[str, str]:
         if not url:
             result[name] = f"skip: .env 中 {url_key} 为空"
             continue
-        headers = build_http_headers(
-            env.get(header_key, "Authorization"), env.get(scheme_key, ""), token
-        )
-        if config_path.exists():
-            backup = config_path.with_suffix(".toml.bak-xuanpin-setup")
-            if not backup.exists():
-                backup.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
-        section = toml_section_http(name, url, headers)
-        text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+        header = env.get(header_key, "Authorization")
+        section = toml_section_http_env(name, url, header, env.get(scheme_key, ""), token_key)
         action = "刷新" if name in existing else "注册"
-        config_path.write_text(replace_toml_section(text, name, section), encoding="utf-8")
-        result[name] = f"ok: 已{action}(http, 认证头 {next(iter(headers))})"
+        _write_config_section(config_path, name, section)
+        result[name] = f"ok: 已{action}(http, 环境变量引用 {token_key};启动 Codex 前须安全注入该环境变量)"
     return result
 
 
@@ -158,14 +164,14 @@ def run_step(label: str, fn) -> tuple[str, str]:
     try:
         return label, fn()
     except Exception as exc:  # 每步独立失败,不中断整体
-        return label, f"fail: {exc}"
+        return label, f"fail: {type(exc).__name__};请检查环境和路径权限"
 
 
 def ensure_venv(engine: Path) -> str:
     py = engine / ".venv" / "bin" / "python"
     if py.exists():
         check = subprocess.run(
-            [str(py), "-c", "import research_workflow"],
+            [str(py), "-c", "import research_workflow, mcp, fastapi, uvicorn, langgraph, polars, fastexcel"],
             capture_output=True, text=True, timeout=60, cwd=engine,
         )
         if check.returncode == 0:
@@ -244,11 +250,17 @@ def main(argv: list[str] | None = None) -> None:
         print(f"[{'ok' if was_created else 'skip'}] 文件 {name}: {'已创建' if was_created else '已存在,不覆盖'}")
     if args.codex:
         report["codex"] = run_step("codex", lambda: register_codex(engine, config_path))[1]
+        if not isinstance(report["codex"], dict):
+            report["codex"] = {"registration": report["codex"]}
         for name, status in report["codex"].items():
             print(f"[{status.split(':')[0]}] codex/{name}: {status}")
 
     report["next_hint"] = "在 .env 填入 token 后重跑本脚本(--codex)完成注册;运行 --check 查看体检结果"
     print(json.dumps(report, ensure_ascii=False))
+    def failed(value):
+        return any(failed(v) for v in value.values()) if isinstance(value, dict) else isinstance(value, str) and value.startswith("fail:")
+    if failed(report):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
