@@ -13,6 +13,14 @@ class ConcentrationMetric:
     top10_asin_share_pct: float
     top3_brand_share_pct: float
     top10_brand_share_pct: float
+    # Seller basis (seller_id). Records without seller_id are NOT merged into one
+    # seller: each is its own bucket when ranking Top-N, and they are reported
+    # separately in the unknown_seller_* fields (share denominator = total_sales).
+    top3_seller_share_pct: float = 0.0
+    top10_seller_share_pct: float = 0.0
+    unknown_seller_sales: int = 0
+    unknown_seller_asin_count: int = 0
+    unknown_seller_share_pct: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)
