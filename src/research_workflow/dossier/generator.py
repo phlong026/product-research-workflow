@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .models import ResearchDossierInput
+from . import external as external_section
 from . import sections
 from .workbook import WORKBOOK_FILENAME, WORKBOOK_SKIPPED_NOTE, openpyxl_available, write_research_workbook
 
@@ -113,6 +114,7 @@ class ResearchDossierGenerator:
             "source_artifacts": [asdict(source) for source in dossier.source_artifacts],
             "data_quality": list(dossier.data_quality),
             "missing_evidence": list(dossier.missing_evidence),
+            **({"external": dossier.external} if dossier.external is not None else {}),
         }
 
     @staticmethod
@@ -413,6 +415,9 @@ class ResearchDossierGenerator:
         else:
             lines.append("暂无原始资料索引。")
 
+        if dossier.external is not None:
+            lines.extend(external_section.external_markdown(dossier.external))
+
         lines.extend([
             "",
             "## 8. 人工最终判断（系统不自动填写）",
@@ -462,6 +467,12 @@ class ResearchDossierGenerator:
             f'<div class="card">{sections.html_table(block)}</div>'
             for block in sections.blocks_for_dashboard(dossier)
         )
+        if dossier.external is not None:
+            extra_cards += (
+                f'<div class="card"><h2>{escape(external_section.TITLE)}</h2>'
+                + "".join(sections.html_table(b) for b in external_section.external_dashboard_blocks(dossier.external))
+                + "</div>"
+            )
 
         return f"""<!doctype html>
 <html lang="zh-CN">

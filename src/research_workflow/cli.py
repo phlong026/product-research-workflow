@@ -58,11 +58,13 @@ from research_workflow.connectors.base import ConnectorError
 from research_workflow.connectors.sellersprite import SellerSpriteConnector
 from research_workflow.domain import ProjectStatus, StepStatus
 from research_workflow.domain.models import utc_now_iso
+from research_workflow import external_ingest
 from research_workflow.dossier import (
     ResearchDossierGenerator,
     ResearchDossierInput,
     SourceArtifact,
 )
+from research_workflow.dossier.external import external_gaps
 from research_workflow.enrichment import (
     ASINEnrichmentService,
     SellerSpriteProductDetailProvider,
@@ -1030,6 +1032,10 @@ def cmd_dossier(args: argparse.Namespace) -> None:
     if new_products is None:
         missing_evidence.append("未提供新品跟踪表(new_products),T09 新品结论缺失")
 
+    # 外部证据(证据登记,非检查点):导出前校验 index.json 登记的哈希,篡改/过期即报错
+    external = external_ingest.load_external(pdir) or external_ingest.empty_external()
+    missing_evidence.extend(external_gaps(external))
+
     output = Path(args.output)
     approvals = svc.store.get_state(args.project).get("approved_checkpoints", {})
     evidence_names = ["records.json", "quality.json", "sources.json", "classification.json", "analysis_context.json",
@@ -1038,6 +1044,7 @@ def cmd_dossier(args: argparse.Namespace) -> None:
                       "table2_edits.json", "table_edits.json"]
     evidence_files = {name: pdir / name for name in evidence_names if (pdir / name).is_file()}
     evidence_files.update({source.sha256 + Path(source.source).suffix: (Path(source.source) if Path(source.source).is_absolute() else pdir / source.source) for source in sources})
+    evidence_files.update(external_ingest.evidence_files(pdir))
     approval_history = {key: dataclasses.asdict(svc.store.get_checkpoint(value)) for key,value in approvals.items()}
     classification_envelope = _load_json(pdir / "classification.json")
     records_hash = _sha256_file(pdir / "records.json")
@@ -1072,6 +1079,7 @@ def cmd_dossier(args: argparse.Namespace) -> None:
             approval_history=workbook_approvals,
             data_quality=data_quality,
             missing_evidence=missing_evidence,
+            external=external,
             metadata={**context, "approved_checkpoints": svc.store.get_state(args.project).get("approved_checkpoints", {})},
         ),
         output, evidence_files=evidence_files, approval_history=approval_history,
@@ -1089,6 +1097,69 @@ def cmd_dossier(args: argparse.Namespace) -> None:
             "next": "向用户汇报研究发现;最终商业 Yes/No 由人工填写,系统不代填",
         }
     )
+
+
+# --- 外部证据登记与预测(证据登记不是人工检查点;external/ 不参与已审工件哈希) ---
+
+def cmd_import_evidence(args: argparse.Namespace) -> None:
+    svc = _service(args)
+    if svc.store.get_project(args.project) is None:
+        raise KeyError(f"Unknown project: {args.project}")
+    pdir = _project_dir(args, args.project)
+    path = Path(args.file)
+    meta = _parse_kv(args.meta, "--meta") if args.meta else {}
+    # 先完整解析校验(库抛的 ValueError 原样上抛),通过后才快照与落盘:失败不改任何状态
+    entry = external_ingest.prepare_import(pdir, args.kind, path, meta, utc_now_iso())
+    snapshot = _snapshot_source(pdir, path)
+    if _sha256_file(snapshot) != entry["sha256"]:
+        raise ValueError("导入过程中源文件发生变化;请重新导入")
+    row = external_ingest.commit_import(pdir, args.kind, entry, snapshot)
+    _emit({
+        "project_id": args.project, "kind": args.kind, "seq": row["seq"], "file": row["file_name"],
+        "sha256": row["sha256"], "snapshot": row["snapshot"], "records": row["record_count"],
+        "summary": row["summary"], "index": str(pdir / external_ingest.EXTERNAL_DIR / external_ingest.INDEX_NAME),
+        "note": "证据登记,不是人工检查点;不影响已审批工件,导出 dossier 时随 evidence/ 与 manifest 一并校验",
+        "next": "继续 import-evidence,或 build-market-forecast / build-cross-channel,或 dossier",
+    })
+
+
+def cmd_build_market_forecast(args: argparse.Namespace) -> None:
+    svc = _service(args)
+    if svc.store.get_project(args.project) is None:
+        raise KeyError(f"Unknown project: {args.project}")
+    pdir = _project_dir(args, args.project)
+    doc = external_ingest.build_forecast(
+        pdir, scope=args.scope, method=args.method, horizon_years=args.horizon_years,
+        granularity=args.granularity, coverage_ratio=args.coverage_ratio, coverage_source=args.coverage_source,
+        target_scope=args.target_scope, low_growth=args.low_growth, high_growth=args.high_growth,
+        today=_today(), created_at=utc_now_iso(),
+    )
+    result = doc["result"]
+    _emit({
+        "project_id": args.project, "is_forecast": True, "scope": result["scope"], "source_scope": result["source_scope"],
+        "method": result["method"], "base_period": result["base_period"], "base_value": result["base_value"],
+        "horizon": result["horizon"], "scenarios": sorted(result["scenarios"]),
+        "assumptions": result["assumptions"], "file": str(pdir / external_ingest.EXTERNAL_DIR / external_ingest.FORECAST_NAME),
+        "note": "预测值是外推,不是观测;假设见 assumptions。证据登记,不是人工检查点",
+        "next": "可选 build-cross-channel(需已导入 tiktok-units),或 dossier",
+    })
+
+
+def cmd_build_cross_channel(args: argparse.Namespace) -> None:
+    svc = _service(args)
+    if svc.store.get_project(args.project) is None:
+        raise KeyError(f"Unknown project: {args.project}")
+    pdir = _project_dir(args, args.project)
+    doc = external_ingest.build_cross_channel(pdir, geo=args.geo, segment=args.segment, created_at=utc_now_iso())
+    summary = doc["summary"]
+    _emit({
+        "project_id": args.project, "geo": doc["geo"], "segment": doc["segment"], "unit": summary["unit"],
+        "rows": len(summary["table"]), "limitations": summary["limitations"],
+        "human_decision_slot": summary["human_decision_slot"],
+        "file": str(pdir / external_ingest.EXTERNAL_DIR / external_ingest.CROSS_CHANNEL_NAME),
+        "note": "仅事实整合,不含商业建议;决策栏由人工填写。证据登记,不是人工检查点",
+        "next": "dossier",
+    })
 
 
 # --- 三张表的人工校正协议(T1-9):导出 → 修改 → 上传校验 → 旧审批失效 → 重新确认 ---
@@ -1448,6 +1519,34 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pair", action="append", default=[], help="份额分解对 YYYY-MM:YYYY-MM")
     p.add_argument("--period", action="append", default=[], help="跨期比较 a起点:a终点:b起点:b终点")
     p.set_defaults(func=cmd_analyze)
+
+    p = sub.add_parser("import-evidence", help="登记外部证据(趋势/研报/TikTok 台数/专利/广告/大品牌/站外);证据登记不是人工检查点")
+    p.add_argument("--project", required=True)
+    p.add_argument("--kind", required=True, choices=list(external_ingest.KINDS))
+    p.add_argument("--file", required=True)
+    p.add_argument("--meta", action="append", default=[], help="来源/口径元数据 key=value,可多次(trends 需 geo/timeframe/source_name/source_url/as_of)")
+    p.set_defaults(func=cmd_import_evidence)
+
+    p = sub.add_parser("build-market-forecast", help="analyze 之后:对 Top 样本月销量外推预测(预测值,假设随结果登记)")
+    p.add_argument("--project", required=True)
+    p.add_argument("--scope", choices=["top_sample", "amazon_channel", "full_market"], default="top_sample",
+                   help="输入序列口径;market_metrics 只覆盖 Top 样本,故仅 top_sample 可用")
+    p.add_argument("--method", choices=["cagr", "linear"], default="cagr")
+    p.add_argument("--horizon-years", type=int, required=True)
+    p.add_argument("--granularity", choices=["monthly", "annual"], default="monthly",
+                   help="annual 只聚合 12 个月齐全的年份(需 ≥2 个整年)")
+    p.add_argument("--target-scope", choices=["amazon_channel", "full_market"], help="跨口径时的报告口径,必须配 --coverage-ratio")
+    p.add_argument("--coverage-ratio", type=float, help="样本占目标口径的比例 (0,1],须配 --coverage-source")
+    p.add_argument("--coverage-source", help="覆盖率的来源说明(必填于 --coverage-ratio)")
+    p.add_argument("--low-growth", type=float, help="低情景:cagr=年增速小数(0.05=5%%),linear=每年增量(台)")
+    p.add_argument("--high-growth", type=float, help="高情景,口径同 --low-growth")
+    p.set_defaults(func=cmd_build_market_forecast)
+
+    p = sub.add_parser("build-cross-channel", help="forecast 与 tiktok-units 都存在时,生成 Amazon×TikTok 事实整合(人工决策栏留空)")
+    p.add_argument("--project", required=True)
+    p.add_argument("--geo", help="tiktok-units 含多个 geo/segment 时指定")
+    p.add_argument("--segment")
+    p.set_defaults(func=cmd_build_cross_channel)
 
     p = sub.add_parser("dossier", help="生成研究资料包")
     p.add_argument("--project", required=True)
