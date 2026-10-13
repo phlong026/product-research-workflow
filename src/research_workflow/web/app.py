@@ -292,7 +292,7 @@ def create_web_app(*, db_path: str | Path, root: str | Path, web_db_path: str | 
     def export_file(project_id: str, name: str, request: Request):
         access(request, project_id)
         path = root / project_id / "exports" / name
-        if name not in {"table1.csv", "table2.csv", "table3.csv"} or not path.is_file():
+        if name not in {"table1.csv", "table2.csv", "table3.csv", "reconcile.csv"} or not path.is_file():
             raise HTTPException(status_code=404, detail="导出文件不存在")
         return FileResponse(path, media_type="text/csv", filename=name)
 

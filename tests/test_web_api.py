@@ -270,3 +270,48 @@ def test_member_listing_and_removal(env) -> None:
     assert alice.client.delete(f"/api/projects/{pid}/members/alice", headers={"X-CSRF-Token": alice.csrf}).status_code == 409
     assert alice.client.delete(f"/api/projects/{pid}/members/bob", headers={"X-CSRF-Token": alice.csrf}).status_code == 200
     assert bob.get(f"/api/projects/{pid}").status_code == 404
+
+
+def test_reconcile_report_is_downloadable_via_exports(env) -> None:
+    app, _ = env
+    alice = Session(app, "alice", "alice-pass-123")
+    pid = new_project(alice)
+    up = alice.put(f"/api/projects/{pid}/uploads?filename=2026-01.csv", CSV.encode("utf-8"))
+    assert alice.run_job(pid, "ingest", {"uploads": [up.json()["upload_id"]]})["status"] == "succeeded"
+    cp = alice.get(f"/api/projects/{pid}").json()["pending_checkpoint"]
+    alice.run_job(pid, "resolve", {"checkpoint_id": cp["checkpoint_id"], "approve": True})
+    assert alice.run_job(pid, "classify", {"labels": {"n": "N"}, "rules": {"n": "nugget"}})["status"] == "succeeded"
+    cp = alice.get(f"/api/projects/{pid}").json()["pending_checkpoint"]
+    alice.run_job(pid, "resolve", {"checkpoint_id": cp["checkpoint_id"], "approve": True, "edits": {"B1": "n"}})
+    assert alice.run_job(pid, "analyze", {})["status"] == "succeeded"
+
+    ref = alice.put(f"/api/projects/{pid}/uploads?filename=ref.csv",
+                    b"key,expected\nmarket.2026-01.total_sales,100\nmarket.2026-01.total_sales_wrong,1\n")
+    job = alice.run_job(pid, "reconcile", {"upload": ref.json()["upload_id"]})
+    assert job["status"] == "succeeded", job
+    assert job["result"]["summary"] == {"total": 2, "MATCH": 1, "MISMATCH": 0, "MISSING": 1}
+    assert job["result"]["report_name"] == "reconcile.csv" and "file" not in job["result"]  # 不泄露服务器路径
+    report = alice.get(f"/api/projects/{pid}/exports/reconcile.csv")
+    assert report.status_code == 200 and "MISSING" in report.text and "MATCH" in report.text
+    bob = Session(app, "bob", "bob-pass-12345")
+    assert bob.get(f"/api/projects/{pid}/exports/reconcile.csv").status_code == 404  # 非成员不可见
+    assert alice.get(f"/api/projects/{pid}/exports/other.csv").status_code == 404
+
+
+def test_table2_import_before_data_review_is_rejected_and_keeps_pending_checkpoint(env) -> None:
+    app, _ = env
+    alice = Session(app, "alice", "alice-pass-123")
+    pid = new_project(alice)
+    up = alice.put(f"/api/projects/{pid}/uploads?filename=2026-01.csv", CSV.encode("utf-8"))
+    assert alice.run_job(pid, "ingest", {"uploads": [up.json()["upload_id"]]})["status"] == "succeeded"
+    pending = alice.get(f"/api/projects/{pid}").json()["pending_checkpoint"]
+    assert pending["step_key"] == "data_review"
+
+    t2 = alice.put(f"/api/projects/{pid}/uploads?filename=t2.csv",
+                   b"asin,title,brand,seller_region,bullets\nN1,Nugget Ice Maker Countertop,NBrand,CN,soft ice || fast\n")
+    job = alice.run_job(pid, "import-table", {"table": 2, "upload": t2.json()["upload_id"]})
+    assert job["status"] == "failed" and "data_review" in (job["error"] or "")
+    # 数据检查点没有被顶掉,仍可正常裁决
+    still = alice.get(f"/api/projects/{pid}").json()["pending_checkpoint"]
+    assert still["checkpoint_id"] == pending["checkpoint_id"]
+    assert alice.run_job(pid, "resolve", {"checkpoint_id": pending["checkpoint_id"], "approve": True})["status"] == "succeeded"

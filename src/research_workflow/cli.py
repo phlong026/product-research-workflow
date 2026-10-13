@@ -1497,6 +1497,8 @@ def _import_table1(svc: WorkflowService, args: argparse.Namespace, pdir: Path) -
 
 
 def _import_table2(svc: WorkflowService, args: argparse.Namespace, pdir: Path) -> None:
+    # 回传表2 会请求补齐检查点并顶替当前待裁决检查点:必须先确认数据检查点,否则它会被顶掉而无法再裁决
+    _require_approved(svc, args.project, pdir, ["data_review"])
     rows = _read_table(args.file, ["asin"], TABLE2_COLUMNS)
     latest, bullets = _asin_views(pdir)
     edits = _table2_edits(pdir)
@@ -1605,6 +1607,8 @@ def cmd_reconcile(args: argparse.Namespace) -> None:
     bad = [r for r in report if r["status"] != "MATCH"]
     _emit({"project_id": args.project, "summary": summarize(rows), "mismatches": bad[:100],
            "file": str(Path(args.output).resolve()) if args.output else None,
+           "report_name": Path(args.output).name if args.output else None,
+           "mismatches_truncated": len(bad) > 100,
            "available_keys_sample": sorted(flat)[:20] if any(r["status"] == "MISSING" for r in report) else None,
            "next": "全部 MATCH 才算该批对账通过;MISMATCH/MISSING 须逐项查明原因(口径差异/数据缺失/缺陷),不得为凑数改容差"})
 
