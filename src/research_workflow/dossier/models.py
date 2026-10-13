@@ -47,3 +47,6 @@ class ResearchDossierInput:
     approval_history: list[dict[str, object]] | None = None
     # 产品迭代进程(metrics/iteration.py);缺省 None 向后兼容,对应小节/工作表写「未提供」。
     iteration: IterationResult | None = None
+    # 外部证据与预测(external_ingest.load_external 的输出,按 kind 分节);缺省 None 向后兼容,
+    # 为 None 时报告不含「外部证据与预测」章节、工作簿不含外部_* 工作表。
+    external: dict[str, Any] | None = None

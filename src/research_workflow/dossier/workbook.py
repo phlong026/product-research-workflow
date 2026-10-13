@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
+from . import external as external_section
 from . import sections
 from .models import ResearchDossierInput
 
@@ -280,6 +281,7 @@ def write_research_workbook(
     _retention_sheet(wb, input)
     _table_sheet(wb, "产品迭代", _ITERATION, input.iteration.segments if input.iteration else None)
     _iteration_notes(wb, input)
+    _external_sheets(wb, input)
     _quality_sheet(wb, input)
     _missing_sheet(wb, input)
     _sources_sheet(wb, input)
@@ -390,6 +392,23 @@ def _iteration_notes(wb: Any, input: ResearchDossierInput) -> None:
     _put(ws, start, 1, "说明", bold=True)
     for offset, note in enumerate(input.iteration.notes, start=1):
         _put(ws, start + offset, 1, note)
+
+
+def _external_sheets(wb: Any, input: ResearchDossierInput) -> None:
+    """外部证据与预测:仅当 input.external 不为 None 时追加;缺数据的表 A1 写「本次运行未提供」。"""
+    if input.external is None:
+        return
+    for table in external_section.external_tables(input.external):
+        columns = [
+            _Col(header, lambda row, i=i: row[i], "pct" if kind == "chg" else kind)
+            for i, (header, kind) in enumerate(zip(table.headers, table.kinds))
+        ]
+        ws = _table_sheet(wb, table.sheet, columns, table.rows)
+        if table.rows is not None and table.notes:
+            start = len(table.rows) + 3
+            _put(ws, start, 1, "说明", bold=True)
+            for offset, note in enumerate(table.notes, start=1):
+                _put(ws, start + offset, 1, note)
 
 
 def _approval_summary(history: Sequence[dict[str, object]]) -> str:
