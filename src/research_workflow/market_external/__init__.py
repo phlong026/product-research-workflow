@@ -1,4 +1,12 @@
 from .evidence import EvidenceLedger, ExternalEvidence
+from .forecast import (
+    CoverageAssumption,
+    ForecastPoint,
+    ForecastResult,
+    ScopeLevel,
+    SeriesPoint,
+    extrapolate,
+)
 from .tiktok import (
     CagrResult,
     ProjectionPoint,
@@ -27,11 +35,16 @@ from .trends import (
 
 __all__ = [
     "CagrResult",
+    "CoverageAssumption",
     "EvidenceLedger",
     "ExternalEvidence",
+    "ForecastPoint",
+    "ForecastResult",
     "GoogleTrendsExport",
     "ProjectionPoint",
     "ProjectionResult",
+    "ScopeLevel",
+    "SeriesPoint",
     "ShareResult",
     "TikTokAnalysis",
     "TrendSeries",
@@ -40,6 +53,7 @@ __all__ = [
     "cagr_2024_2026",
     "check_trends_consistency",
     "combine_for_chart",
+    "extrapolate",
     "import_report_excerpts",
     "load_trends_csv",
     "load_units_file",
