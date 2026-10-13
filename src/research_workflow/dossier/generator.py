@@ -545,7 +545,6 @@ def _svg_chart(months: list[str], series: list[tuple[str, list[int]]]) -> str:
     if not months:
         return "<p>暂无数据。</p>"
     maximum = max((v for _, values in series for v in values), default=0) or 1
-    width, height = 960, 320
     colors = ["#2563eb", "#059669", "#d97706", "#7c3aed", "#db2777"]
     parts = ['<svg viewBox="0 0 960 360" role="img" aria-label="月销量折线图" style="width:100%;height:auto">']
     for i in range(5):
