@@ -29,7 +29,8 @@ KEY = r"^[A-Za-z0-9_.:-]{1,64}$"
 ASIN = r"^[A-Za-z0-9]{1,20}$"
 COMMAND_TIMEOUTS = {"ingest": 3600, "discover-nodes": 900, "classify": 1800, "analyze": 900,
                     "resolve": 300, "dossier": 600, "export-table": 120, "import-table": 300,
-                    "import-evidence": 300, "build-market-forecast": 300, "build-cross-channel": 300}
+                    "import-evidence": 300, "build-market-forecast": 300, "build-cross-channel": 300,
+                    "reconcile": 300}
 
 
 class _Params(BaseModel):
@@ -121,12 +122,16 @@ class ImportTableParams(_Params):
     upload: str = Field(min_length=1, max_length=64)
 
 
+class ReconcileParams(_Params):
+    upload: str = Field(min_length=1, max_length=64)
+
+
 PARAM_MODELS: dict[str, type[_Params]] = {
     "ingest": IngestParams, "discover-nodes": DiscoverParams, "classify": ClassifyParams,
     "resolve": ResolveParams, "analyze": AnalyzeParams, "dossier": DossierParams,
     "export-table": ExportTableParams, "import-table": ImportTableParams,
     "import-evidence": ImportEvidenceParams, "build-market-forecast": MarketForecastParams,
-    "build-cross-channel": CrossChannelParams,
+    "build-cross-channel": CrossChannelParams, "reconcile": ReconcileParams,
 }
 
 
@@ -243,6 +248,10 @@ def build_argv(command: str, params: _Params, *, project_id: str, project_dir: P
         argv += [f"--table={p['table']}", f"--output={exports / ('table' + str(p['table']) + '.csv')}"]
     elif command == "import-table":
         argv += [f"--table={p['table']}", f"--file={upload_path(p['upload'])}"]
+    elif command == "reconcile":
+        exports = project_dir / "exports"
+        exports.mkdir(parents=True, exist_ok=True)
+        argv += [f"--reference={upload_path(p['upload'])}", f"--output={exports / 'reconcile.csv'}"]
     return argv
 
 

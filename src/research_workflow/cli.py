@@ -52,6 +52,7 @@ from research_workflow.data import (
 )
 from research_workflow.discovery import discover_nodes, fetch_monthly_top, merge_nodes_by_asin
 from research_workflow.data.io import read_tabular_rows, write_csv_rows
+from research_workflow.reconcile import flatten_metrics, reconcile, summarize, to_dicts
 from research_workflow.data.models import BSRRecord, MonthlyBSRResult
 from research_workflow.data.bsr_pipeline import normalize_seller_region, validate_month, _to_int
 from research_workflow.connectors.base import ConnectorError
@@ -1511,6 +1512,30 @@ def cmd_import_table(args: argparse.Namespace) -> None:
     {1: _import_table1, 2: _import_table2, 3: _import_table3}[args.table](svc, args, pdir)
 
 
+def cmd_reconcile(args: argparse.Namespace) -> None:
+    """把已计算的指标与人工结果逐项对账,输出差异报告(验收用,只读)。"""
+    svc = _service(args)
+    if svc.store.get_project(args.project) is None:
+        raise KeyError(f"Unknown project: {args.project}")
+    pdir = _project_dir(args, args.project)
+    market = _require_file(pdir / "market_metrics.json", "尚未分析;先运行 analyze")
+    competition = _load_json(pdir / "competition.json") if (pdir / "competition.json").exists() else None
+    new_products = _load_json(pdir / "new_products.json") if (pdir / "new_products.json").exists() else None
+    flat = flatten_metrics(market, competition, new_products)
+    ref = Path(args.reference)
+    if not ref.exists():
+        raise KeyError(f"参考表不存在: {args.reference}")
+    rows = reconcile(read_tabular_rows(ref), flat)
+    report = to_dicts(rows)
+    if args.output:
+        write_csv_rows(Path(args.output), report)
+    bad = [r for r in report if r["status"] != "MATCH"]
+    _emit({"project_id": args.project, "summary": summarize(rows), "mismatches": bad[:100],
+           "file": str(Path(args.output).resolve()) if args.output else None,
+           "available_keys_sample": sorted(flat)[:20] if any(r["status"] == "MISSING" for r in report) else None,
+           "next": "全部 MATCH 才算该批对账通过;MISMATCH/MISSING 须逐项查明原因(口径差异/数据缺失/缺陷),不得为凑数改容差"})
+
+
 def cmd_projects(args: argparse.Namespace) -> None:
     svc = _service(args)
     _emit(
@@ -1591,6 +1616,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--table", type=int, choices=[1, 2, 3], required=True)
     p.add_argument("--file", required=True)
     p.set_defaults(func=cmd_import_table)
+
+    p = sub.add_parser("reconcile", help="指标与人工结果逐项对账(验收,只读):参考表 key,expected[,tolerance_abs,tolerance_pct]")
+    p.add_argument("--project", required=True)
+    p.add_argument("--reference", required=True)
+    p.add_argument("--output")
+    p.set_defaults(func=cmd_reconcile)
 
     p = sub.add_parser("projects", help="列出全部研究项目(跨会话恢复用)")
     p.set_defaults(func=cmd_projects)
