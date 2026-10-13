@@ -28,7 +28,7 @@ MONTH = r"^\d{4}-\d{2}$"
 KEY = r"^[A-Za-z0-9_.:-]{1,64}$"
 ASIN = r"^[A-Za-z0-9]{1,20}$"
 COMMAND_TIMEOUTS = {"ingest": 3600, "discover-nodes": 900, "classify": 1800, "analyze": 900,
-                    "resolve": 300, "dossier": 600}
+                    "resolve": 300, "dossier": 600, "export-table": 120, "import-table": 300}
 
 
 class _Params(BaseModel):
@@ -85,9 +85,19 @@ class DossierParams(_Params):
     pass
 
 
+class ExportTableParams(_Params):
+    table: int = Field(ge=1, le=3)
+
+
+class ImportTableParams(_Params):
+    table: int = Field(ge=1, le=3)
+    upload: str = Field(min_length=1, max_length=64)
+
+
 PARAM_MODELS: dict[str, type[_Params]] = {
     "ingest": IngestParams, "discover-nodes": DiscoverParams, "classify": ClassifyParams,
     "resolve": ResolveParams, "analyze": AnalyzeParams, "dossier": DossierParams,
+    "export-table": ExportTableParams, "import-table": ImportTableParams,
 }
 
 
@@ -180,6 +190,12 @@ def build_argv(command: str, params: _Params, *, project_id: str, project_dir: P
         argv += [f"--pair={x}" for x in p["pairs"]] + [f"--period={x}" for x in p["periods"]]
     elif command == "dossier":
         argv.append(f"--output={next_dossier_dir(project_dir)}")
+    elif command == "export-table":
+        exports = project_dir / "exports"
+        exports.mkdir(parents=True, exist_ok=True)
+        argv += [f"--table={p['table']}", f"--output={exports / ('table' + str(p['table']) + '.csv')}"]
+    elif command == "import-table":
+        argv += [f"--table={p['table']}", f"--file={upload_path(p['upload'])}"]
     return argv
 
 

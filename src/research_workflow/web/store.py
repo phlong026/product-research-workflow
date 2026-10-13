@@ -120,6 +120,13 @@ class WebStore:
         row = self._one("SELECT role FROM project_access WHERE project_id=? AND user_id=?", (project_id, user_id))
         return row["role"] if row else None
 
+    def list_members(self, project_id: str) -> list[dict[str, Any]]:
+        return self._all("SELECT u.username AS username, a.role AS role FROM project_access a JOIN users u ON u.id = a.user_id"
+                         " WHERE a.project_id=? ORDER BY a.role='owner' DESC, u.username", (project_id,))
+
+    def revoke(self, project_id: str, user_id: str) -> None:
+        self._write("DELETE FROM project_access WHERE project_id=? AND user_id=?", (project_id, user_id))
+
     def project_ids_for(self, user_id: str) -> list[dict[str, Any]]:
         return self._all("SELECT project_id, role FROM project_access WHERE user_id=?", (user_id,))
 

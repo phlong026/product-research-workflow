@@ -41,6 +41,9 @@ uv pip install -e '.[dev,workflow,data,xlsx]' -p .venv
 | GET | `/api/projects` | 我可见的项目 `[ {project_id,product,marketplace,status,role,created_at} ]` |
 | GET | `/api/projects/{id}` | 引擎现场:`state/steps`、`pending_checkpoint{checkpoint_id,step_key,prompt,payload}`、`artifacts[]`、`next`(ingest/classify/analyze/dossier/resolve/done)、`role` |
 | POST | `/api/projects/{id}/members` `{username,role: editor\|viewer}` | owner 分享 |
+| GET | `/api/projects/{id}/members` | 成员名单 `[ {username,role} ]`(任何成员可看) |
+| DELETE | `/api/projects/{id}/members/{username}` | owner 移除成员(不能移除所有者) |
+| GET | `/api/projects/{id}/exports/table{1,2,3}.csv` | 下载 `export-table` 作业导出的表 |
 | PUT | `/api/projects/{id}/uploads?filename=x.csv` | 请求体=文件原始字节;返回 `{upload_id,filename,sha256,size}`(editor+) |
 | POST | `/api/projects/{id}/jobs` `{command,params}` | 提交作业,202 `{job_id}`;项目已有进行中作业 409;参数非法 422 |
 | GET | `/api/projects/{id}/jobs` | 作业列表(新→旧) |
@@ -59,6 +62,8 @@ uv pip install -e '.[dev,workflow,data,xlsx]' -p .venv
 | `classify` | `{labels:{key:名称}, rules?:{key:"词1,词2"}, dimension?, provider?: rules\|llm, enrich?: bool}` → `classification_review` 检查点;`needs_review` 行必须在 resolve 时用 `edits` 指定 |
 | `analyze` | `{new_products_upload?, sales_threshold?, consecutive_months?, early_window?, promotion_threshold?, retention_threshold?, study_month?, pairs?, periods?}` → `research_route_review` 检查点 |
 | `resolve` | `{checkpoint_id, approve: bool, edits?:{ASIN:标签}, select?:[route_id...]}` —— **只能由用户明确点击触发,前端不得自动批准** |
+| `export-table` | `{table: 1\|2\|3}` → 生成 `exports/table{n}.csv`,经 exports 接口下载 |
+| `import-table` | `{table, upload: upload_id}` → 校验人工修改后的表;成功后旧审批失效并重新请求对应检查点(表1→data_review,表3→classification_review,表2→需重跑 classify);校验失败不改任何状态 |
 | `dossier` | `{}` → 服务端选择新版本目录 |
 
 ## 前端要求(红线)

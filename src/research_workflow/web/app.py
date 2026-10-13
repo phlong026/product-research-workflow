@@ -270,6 +270,32 @@ def create_web_app(*, db_path: str | Path, root: str | Path, web_db_path: str | 
         audit.info("project %s: granted %s to user=%r", project_id, body.role, body.username)
         return {"username": body.username, "role": body.role}
 
+    @app.get("/api/projects/{project_id}/members")
+    def list_members(project_id: str, request: Request):
+        access(request, project_id)
+        return {"members": store.list_members(project_id)}
+
+    @app.delete("/api/projects/{project_id}/members/{username}")
+    def remove_member(project_id: str, username: str, request: Request):
+        access(request, project_id, "owner")
+        target = store.get_user_by_name(username)
+        role = store.project_role(project_id, target["id"]) if target else None
+        if role is None:
+            raise HTTPException(status_code=404, detail="成员不存在")
+        if role == "owner":
+            raise HTTPException(status_code=409, detail="不能移除所有者")
+        store.revoke(project_id, target["id"])
+        audit.info("project %s: revoked user=%r", project_id, username)
+        return {"username": username, "removed": True}
+
+    @app.get("/api/projects/{project_id}/exports/{name}")
+    def export_file(project_id: str, name: str, request: Request):
+        access(request, project_id)
+        path = root / project_id / "exports" / name
+        if name not in {"table1.csv", "table2.csv", "table3.csv"} or not path.is_file():
+            raise HTTPException(status_code=404, detail="导出文件不存在")
+        return FileResponse(path, media_type="text/csv", filename=name)
+
     # --- uploads / artifacts / dossiers ---
     @app.put("/api/projects/{project_id}/uploads", status_code=201)
     async def upload(project_id: str, filename: str, request: Request):

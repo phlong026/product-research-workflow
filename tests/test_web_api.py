@@ -228,3 +228,45 @@ def test_admin_user_management(env) -> None:
     assert admin.post("/api/admin/users", body).status_code == 201
     assert admin.post("/api/admin/users", {**body, "password": "short"}).status_code == 422
     Session(app, "carol", "carol-pass-12345")
+
+
+def test_table_export_import_roundtrip_via_jobs(env) -> None:
+    app, _ = env
+    alice = Session(app, "alice", "alice-pass-123")
+    pid = new_project(alice)
+    up = alice.put(f"/api/projects/{pid}/uploads?filename=2026-01.csv", CSV.encode("utf-8"))
+    assert alice.run_job(pid, "ingest", {"uploads": [up.json()["upload_id"]]})["status"] == "succeeded"
+    cp = alice.get(f"/api/projects/{pid}").json()["pending_checkpoint"]
+    assert alice.run_job(pid, "resolve", {"checkpoint_id": cp["checkpoint_id"], "approve": True})["status"] == "succeeded"
+
+    assert alice.run_job(pid, "export-table", {"table": 1})["status"] == "succeeded"
+    exported = alice.get(f"/api/projects/{pid}/exports/table1.csv")
+    assert exported.status_code == 200 and "monthly_sales" in exported.text
+    assert alice.get(f"/api/projects/{pid}/exports/table9.csv").status_code == 404
+    assert alice.get(f"/api/projects/{pid}/exports/..%2Frecords.json").status_code == 404
+
+    edited = exported.text.replace(",80,", ",81,")
+    assert edited != exported.text
+    edited_up = alice.put(f"/api/projects/{pid}/uploads?filename=table1-edit.csv", edited.encode("utf-8"))
+    job = alice.run_job(pid, "import-table", {"table": 1, "upload": edited_up.json()["upload_id"]})
+    assert job["status"] == "succeeded", job
+    state = alice.get(f"/api/projects/{pid}").json()
+    assert state["pending_checkpoint"]["step_key"] == "data_review"  # 旧审批失效,需重新确认
+    assert state["pending_checkpoint"]["payload"]["source_mode"] == "human_table1"
+    # 其他用户读不到导出
+    bob = Session(app, "bob", "bob-pass-12345")
+    assert bob.get(f"/api/projects/{pid}/exports/table1.csv").status_code == 404
+
+
+def test_member_listing_and_removal(env) -> None:
+    app, _ = env
+    alice, bob = Session(app, "alice", "alice-pass-123"), Session(app, "bob", "bob-pass-12345")
+    pid = new_project(alice)
+    alice.post(f"/api/projects/{pid}/members", {"username": "bob", "role": "viewer"})
+    members = alice.get(f"/api/projects/{pid}/members").json()["members"]
+    assert {(m["username"], m["role"]) for m in members} == {("alice", "owner"), ("bob", "viewer")}
+    assert bob.get(f"/api/projects/{pid}/members").status_code == 200  # 成员可查看名单
+    assert bob.client.delete(f"/api/projects/{pid}/members/alice", headers={"X-CSRF-Token": bob.csrf}).status_code == 403
+    assert alice.client.delete(f"/api/projects/{pid}/members/alice", headers={"X-CSRF-Token": alice.csrf}).status_code == 409
+    assert alice.client.delete(f"/api/projects/{pid}/members/bob", headers={"X-CSRF-Token": alice.csrf}).status_code == 200
+    assert bob.get(f"/api/projects/{pid}").status_code == 404
