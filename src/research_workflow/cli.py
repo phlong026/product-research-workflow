@@ -238,8 +238,9 @@ def _build_llm_complete():
     model = os.environ.get("RESEARCH_LLM_MODEL", "claude-sonnet-5-5")
 
     async def complete(prompt: str) -> str:
+        # 不传 temperature/top_p/top_k:Sonnet 5/5.5、Opus 5.x 等当前模型拒绝非默认采样参数(400)。
         message = await client.messages.create(
-            model=model, max_tokens=8192, temperature=0,
+            model=model, max_tokens=8192,
             messages=[{"role": "user", "content": prompt}],
         )
         return "".join(block.text for block in message.content if getattr(block, "type", "") == "text")
