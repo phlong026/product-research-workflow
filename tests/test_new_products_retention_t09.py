@@ -150,3 +150,60 @@ def test_new_fields_are_to_dict_serialisable_and_snapshot_parent_optional():
     assert d["config"]["study_month"] == "2026-06"
     assert d["outcomes"][0]["retention_status"] in {"retained", "not_retained", "unknown"}
     assert NewProductSnapshot("A", "2026-01", 1).parent_asin == ""
+
+
+# --- 中间缺月 = 未知(而非 0):三态判定 ---------------------------------------------
+
+
+def _gap_rows(asin, values_by_month):
+    return [snap(asin, f"2026-{m:02d}", v) for m, v in values_by_month.items()]
+
+
+def _analyze_one(values_by_month, **cfg):
+    rows = _gap_rows("G1", values_by_month)
+    config = NewProductConfig(250, 3, 3, study_month="2026-04", **cfg)
+    result = analyze_new_products(rows, config)
+    return result.outcomes[0], result.summary
+
+
+def test_interior_gap_that_could_complete_streak_is_unknown():
+    # 01=300, 02 缺失, 03=300, 04=300:02 若 >=250 则连续 4 月达标
+    outcome, summary = _analyze_one({1: 300, 3: 300, 4: 300})
+    assert outcome.launch_success_status == "unknown"
+    assert outcome.launch_success is False  # 旧布尔字段保持兼容(未知不当作成功)
+    assert outcome.success_month is None
+    assert outcome.retention_status == "unknown"
+    assert outcome.current_survival is None  # 成功与否未知,不能判存活为 False
+    assert summary.retained_products == 0
+    assert summary.retention_unknown_products == 1
+    assert math.isclose(summary.retention_rate_pct, 0.0)
+    assert math.isclose(summary.retention_rate_upper_bound_pct, 100.0)
+    assert summary.successful_products == 0
+    assert summary.launch_success_unknown_products == 1
+    assert math.isclose(summary.success_rate_upper_bound_pct, 100.0)
+
+
+def test_interior_gap_that_cannot_complete_streak_is_definitively_no():
+    # 01=300, 02 缺失, 03=100(未达标), 04=300:补满 02 也凑不齐连续 3 月
+    outcome, summary = _analyze_one({1: 300, 3: 100, 4: 300})
+    assert outcome.launch_success_status == "no"
+    assert outcome.launch_success is False
+    assert outcome.retention_status == "not_retained"
+    assert summary.launch_success_unknown_products == 0
+    assert summary.retention_unknown_products == 0
+    assert math.isclose(summary.retention_rate_upper_bound_pct, 0.0)
+
+
+def test_observed_streak_across_gap_is_yes_and_unchanged():
+    # 观测月份本身已满足连续 3 月 -> yes,与缺月无关
+    outcome, _ = _analyze_one({1: 10, 2: 300, 3: 300, 4: 300})
+    assert outcome.launch_success_status == "yes"
+    assert outcome.launch_success is True
+    assert outcome.success_month == "2026-04"
+    assert outcome.retention_status == "retained"
+
+
+def test_observed_current_month_below_threshold_falsifies_retention_despite_gap():
+    # 研究当月已观测且未达标:即使历史有缺月,留存也可被证伪
+    outcome, _ = _analyze_one({1: 300, 3: 300, 4: 100})
+    assert outcome.retention_status == "not_retained"

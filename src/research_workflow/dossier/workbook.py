@@ -225,6 +225,7 @@ _NEW_PRODUCT = [
     _c("首次达标月", "first_threshold_month"),
     _c("首次达标月序", "first_threshold_month_index", "int"),
     _c("是否成功", "launch_success", "bool"),
+    _c("成功判定(yes/no/unknown)", "launch_success_status"),
     _c("成功月", "success_month"),
     _c("当前月", "current_month"),
     _c("当前销量", "current_sales", "int"),
