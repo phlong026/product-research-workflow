@@ -11,14 +11,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import calendar
 import dataclasses
 import io
 from contextlib import redirect_stdout
 import json
+import logging
 import os
 import re
 import sqlite3
-import shutil
 import tempfile
 import sys
 from datetime import date
@@ -40,7 +41,6 @@ from research_workflow.classification import (
 )
 from research_workflow.classification.models import (
     ClassificationBatch,
-    ProductClassification,
 )
 from research_workflow.competition import build_competition_metrics
 from research_workflow.competition.models import CompetitionMetricsResult
@@ -77,6 +77,7 @@ from research_workflow.mcp import MCPGateway, MCPRegistry
 from research_workflow.metrics import build_market_metrics
 from research_workflow.metrics.models import MarketMetricsResult
 from research_workflow.metrics import IterationConfig, IterationResult, build_iteration_comparison
+from research_workflow.new_products.engine import _normalize_month
 from research_workflow.new_products import (
     NewProductConfig,
     NewProductSnapshot,
@@ -89,6 +90,7 @@ from research_workflow.router.models import ResearchRoutePlan
 from research_workflow.store import SQLiteStore
 from research_workflow.workflow import WorkflowService
 
+logger = logging.getLogger("research_workflow.cli")
 MONTH_IN_FILENAME = re.compile(r"(20\d{2})[-_.]?(\d{2})")
 
 
@@ -267,11 +269,13 @@ def _load_records(pdir: Path, *, overlay: bool = True) -> list[BSRRecord]:
         records.extend(rebuild(BSRRecord, row) for row in by_month[month])
     if overlay:
         # 补齐/人工表2 只填 UNKNOWN 地区,不改人工审过的 records.json(其哈希已绑定 data_review)。
-        regions = dict(_load_json(pdir / "enrichment.json").get("regions", {})) if (pdir / "enrichment.json").is_file() else {}
-        regions.update(_table2_edits(pdir).get("regions", {}))
+        machine = _load_json(pdir / "enrichment.json").get("regions", {}) if (pdir / "enrichment.json").is_file() else {}
+        human = _table2_edits(pdir).get("regions", {})
         for record in records:
-            if record.seller_region in ("", "UNKNOWN") and regions.get(record.asin):
-                record.seller_region = regions[record.asin]
+            if human.get(record.asin):  # 人工校正的表2 优先于一切(含源数据里已有的地区)
+                record.seller_region = human[record.asin]
+            elif record.seller_region in ("", "UNKNOWN") and machine.get(record.asin):
+                record.seller_region = machine[record.asin]
     return records
 
 
@@ -294,7 +298,7 @@ STAGES = ["collect_bsr", "data_review", "enrich_asins", "classify", "classificat
           "apply_classification_review", "market_metrics", "market_analysis", "competition_metrics",
           "new_product_analysis", "research_route", "route_review", "research_route_review",
           "apply_route_review", "dossier"]
-DERIVED_FILES = {"collect_bsr": ["table2_edits.json"], "classify": ["classification.json", "enrichment.json"], "market_metrics": ["market_metrics.json",
+DERIVED_FILES = {"collect_bsr": ["table2_edits.json", "coverage.json", "table_edits.json"], "classify": ["classification.json", "enrichment.json"], "market_metrics": ["market_metrics.json",
                  "market_analysis.json", "competition.json", "new_products.json", "route_plan.json",
                  "analysis_context.json", "new_product_queue.json", "iteration.json"]}
 
@@ -322,13 +326,26 @@ def _require_approved(svc: WorkflowService, pid: str, pdir: Path, steps: list[st
         _verify_hashes(pdir, (cp.response or {}).get("artifact_hashes", {}))
 
 
-def _invalidate(svc: WorkflowService, pid: str, pdir: Path, start: str) -> None:
+HUMAN_FILES = {"table2_edits.json"}  # 含人工成果的派生文件:失效时移入 superseded/ 备份,不直接删除
+
+
+def _invalidate(svc: WorkflowService, pid: str, pdir: Path, start: str) -> list[str]:
+    """使 start 及其下游失效;返回被作废的人工成果文件名(已备份到 superseded/)。"""
     stages = STAGES[STAGES.index(start):]
     svc.invalidate_steps(pid, stages)
+    superseded: list[str] = []
     for stage, names in DERIVED_FILES.items():
         if stage in stages:
             for name in names:
-                (pdir / name).unlink(missing_ok=True)
+                path = pdir / name
+                if name in HUMAN_FILES and path.is_file():
+                    backup = pdir / "superseded" / f"{name}.{utc_now_iso().replace(':', '')}"
+                    backup.parent.mkdir(parents=True, exist_ok=True)
+                    path.replace(backup)
+                    superseded.append(name)
+                else:
+                    path.unlink(missing_ok=True)
+    return superseded
 
 
 # --- 子命令 ---
@@ -390,13 +407,13 @@ def _persist_ingest(
         }
     replaced_months = {result.month for result in results}
     all_sources = {key: value for key, value in all_sources.items()
-                   if key.split(":", 1)[0] not in replaced_months}
+                   if key.split(":", 1)[0] not in replaced_months and value.get("kind") != "human_table1"}
     all_sources.update(sources)
     if not results or any(not result.records for result in results):
         raise ValueError("每个导入月份必须有有效数据;空数据不能作为零销量市场进入分析")
     if any(result.quality.invalid_sales_rows for result in results):
         raise ValueError("存在缺失/非法销量;请修正源数据后重新导入，不能将缺失视为零销量")
-    _invalidate(svc, args.project, pdir, "collect_bsr")
+    superseded = _invalidate(svc, args.project, pdir, "collect_bsr")
 
     _save_json(pdir / "records.json", by_month)
     _save_json(pdir / "quality.json", quality)
@@ -410,6 +427,8 @@ def _persist_ingest(
         "请检查清洗后的月度数据(行数、去重、质量警告),确认后继续。",
         {"months": summary, "sources": list(all_sources.values()), "source_mode": source_mode,
          "missing_months": sorted(coverage["missing"]) if coverage else [],
+         "missing_reasons": coverage.get("missing_reasons", {}) if coverage else {},
+         "all_months": sorted(by_month),
          "artifact_hashes": _hashes(pdir, ["records.json", "quality.json", "sources.json"]
                                     + (["coverage.json"] if coverage is not None else []))},
     )
@@ -419,7 +438,10 @@ def _persist_ingest(
             "source_mode": source_mode,
             "months": summary,
             "records_file": str(pdir / "records.json"),
+            "all_months": sorted(by_month),
+            "superseded_human_edits": superseded,
             **({"missing_months": sorted(coverage["missing"]),
+                "missing_reasons": coverage.get("missing_reasons", {}),
                 "coverage": {"complete": coverage["complete"], "expected": len(coverage["expected"]),
                              "present": len(coverage["present"])},
                 "nodes": coverage["nodes"]} if coverage is not None else {}),
@@ -483,17 +505,25 @@ async def _fetch_live(args: argparse.Namespace, pdir: Path) -> tuple[list[Monthl
     results: list[MonthlyBSRResult] = []
     sources: dict[str, Any] = {}
     missing: dict[str, str] = {}
+    errored: dict[str, str] = {}
     partial_nodes: dict[str, list[str]] = {}
     raw_dir = pdir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     for month in months:
         have = {scope: f for scope, f in fetched.items() if month in f.rows_by_month}
-        if not have:
-            missing[month] = "; ".join(sorted({f.missing_months.get(month, "no data") for f in fetched.values()}))
+        reasons = {str(scope): f.missing_months[month] for scope, f in fetched.items() if month in f.missing_months}
+        failed = sorted(scope for scope, reason in reasons.items() if reason.startswith("connector_error"))
+        if failed:  # 接口失败≠无数据:不能当作缺月悄悄放过
+            errored[month] = ", ".join(f"{scope}: {reasons[scope]}" for scope in failed)
             continue
         lacking = sorted(str(scope) for scope in fetched if scope not in have)
         if lacking:
-            partial_nodes[month] = lacking
+            # 多节点月份必须各节点齐全:缺一个节点就等于把它的销量当 0,所以整月不纳入并显式报告
+            missing[month] = (f"节点 {','.join(lacking)} 缺该月数据(多节点月份须各节点齐全,否则整月不纳入)"
+                              if have else "; ".join(sorted(set(reasons.values())) or ["no data"]))
+            if have:
+                partial_nodes[month] = lacking
+            continue
         for scope, f in have.items():
             suffix = f"__{_safe_name(scope)}" if scope else ""
             raw_path = raw_dir / f"{month}{suffix}.json"
@@ -515,8 +545,11 @@ async def _fetch_live(args: argparse.Namespace, pdir: Path) -> tuple[list[Monthl
             rows = list(next(iter(have.values())).rows_by_month[month])
         results.append(build_monthly_top(rows, month, MonthlyBSRConfig(top_n=args.top_n)))
 
+    if errored:
+        logger.warning("live fetch connector errors months=%s", sorted(errored))
+        raise ValueError(f"以下月份的接口调用失败(不是无数据),请检查会话/限流后重试: {errored}")
     if missing and not auto:
-        raise ValueError(f"显式指定的月份无数据,不能静默跳过: {sorted(missing)};请改月份或使用 --months auto")
+        raise ValueError(f"显式指定的月份无数据或节点不齐,不能静默跳过: {missing};请改月份/节点或使用 --months auto")
     if not results:
         raise ValueError("所有月份均无数据;检查关键词、站点、节点或登录状态")
     if all(result.stats.parsed_rows == 0 for result in results):
@@ -600,6 +633,12 @@ def cmd_ingest(args: argparse.Namespace) -> None:
             "source": snapshot.relative_to(pdir).as_posix(),
             "sha256": _sha256_file(snapshot),
         }
+    by_month_files: dict[str, list[str]] = {}
+    for file_name, result in zip(args.file, results):
+        by_month_files.setdefault(result.month, []).append(Path(file_name).name)
+    duplicated = {m: names for m, names in by_month_files.items() if len(names) > 1}
+    if duplicated:
+        raise ValueError(f"同一月份出现多个文件: {duplicated};多节点样本请用 --live --nodes 合并,或先在表格中合并为一个文件(静默覆盖会丢数据)")
     _persist_ingest(svc, args, pdir, results, sources, source_mode="file")
 
 
@@ -673,6 +712,7 @@ def cmd_classify(args: argparse.Namespace) -> None:
                 image_url=record.image_url,
             ),
         )
+    llm_complete = _build_llm_complete() if args.provider == "llm" else None  # 先校验 LLM 配置,避免补齐跑完才失败
     enrichment = _run_enrichment(args, project, records, profiles) if args.enrich else None
     table2 = _table2_edits(pdir)  # 人工校正的表2 优先于机器补齐
     for asin, bullets in table2.get("bullets", {}).items():
@@ -688,7 +728,7 @@ def cmd_classify(args: argparse.Namespace) -> None:
     ]
     schema = ClassificationSchema(project_id=args.project, dimension=args.dimension, labels=labels)
     if args.provider == "llm":
-        provider = LLMClassificationProvider(_build_llm_complete())
+        provider = LLMClassificationProvider(llm_complete)
     else:
         rules = {
             key: [word.strip() for word in value.split(",") if word.strip()]
@@ -696,6 +736,12 @@ def cmd_classify(args: argparse.Namespace) -> None:
         } if args.rule else {}
         provider = RuleClassificationProvider(rules)
     batch = asyncio.run(ClassificationService(provider).classify(schema, list(profiles.values())))
+    if args.provider == "llm":
+        failed = [row for row in batch.rows.values() if row.review_reason.startswith("llm call failed")]
+        if batch.rows and len(failed) == len(batch.rows):  # 全部调用失败≠"全部待人工":必须让命令失败,不保存任何结果
+            logger.error("LLM classification failed for all %d ASINs: %s", len(failed), failed[0].review_reason[:200])
+            raise ValueError(f"LLM 分类调用全部失败({len(failed)} 个 ASIN),未保存任何结果;"
+                             f"请检查 API 密钥/模型名/网络。原因示例: {failed[0].review_reason[:200]}")
 
     _invalidate(svc, args.project, pdir, "enrich_asins")
     if enrichment is not None:
@@ -872,6 +918,8 @@ def cmd_analyze(args: argparse.Namespace) -> None:
 
     new_products = None
     new_product_queue = None
+    queue_excluded = 0
+    queue_filter = "no_new_products_file"
     if args.new_products_file:
         new_source = _snapshot_source(pdir, Path(args.new_products_file))
         rows = read_tabular_rows(new_source)
@@ -890,8 +938,25 @@ def cmd_analyze(args: argparse.Namespace) -> None:
             for row in rows
             if str(_col(row, "ASIN", "asin")).strip()
         ]
+        queue_month = args.study_month or max(_normalize_month(snapshot.month) for snapshot in snapshots)
+        new_product_queue = build_new_product_queue(snapshots, study_month=queue_month)
+        analysis_snapshots = snapshots
+        if args.skip_queue_filter:
+            queue_filter = "skipped_by_flag"
+        elif not any(snapshot.launch_date for snapshot in snapshots):
+            queue_filter = "skipped_no_launch_dates"  # 整表没有上架时间,无法判断新品窗口/老带新:显式降级并披露
+        else:
+            queue_filter = "applied"
+        if queue_filter == "applied":
+            # 留存率等指标的分母只统计通过"新品窗口 / 老带新 / 人工排除"过滤的 ASIN(口径确认单 #4)
+            in_queue = {item.asin for item in new_product_queue.items}
+            analysis_snapshots = [snapshot for snapshot in snapshots if snapshot.asin in in_queue]
+            queue_excluded = len({s.asin for s in snapshots}) - len(in_queue & {s.asin for s in snapshots})
+            if not analysis_snapshots:
+                raise ValueError("新品队列为空:没有 ASIN 通过新品窗口/老带新/人工排除过滤;"
+                                 "若新品表已人工预筛,请加 --skip-queue-filter")
         new_products = analyze_new_products(
-            snapshots,
+            analysis_snapshots,
             NewProductConfig(
                 sales_threshold=args.sales_threshold,
                 consecutive_months=args.consecutive_months,
@@ -902,11 +967,12 @@ def cmd_analyze(args: argparse.Namespace) -> None:
                 study_month=args.study_month,
             ),
         )
-        queue_month = args.study_month or max(snapshot.month for snapshot in snapshots)
-        new_product_queue = build_new_product_queue(snapshots, study_month=queue_month)
 
     route_plan = ResearchRouter().suggest(market, competition, new_products)
-    iteration = build_iteration_comparison(records, classifications, config=IterationConfig(as_of=_today()))
+    last_month = max(record.month for record in records)  # 取数据最大月份的月末,同输入同输出(不依赖今天的日期)
+    as_of = date(int(last_month[:4]), int(last_month[5:7]), 1)
+    as_of = as_of.replace(day=calendar.monthrange(as_of.year, as_of.month)[1])
+    iteration = build_iteration_comparison(records, classifications, config=IterationConfig(as_of=as_of))
 
     _invalidate(svc, args.project, pdir, "market_metrics")
     _save_json(pdir / "market_metrics.json", market.to_dict())
@@ -920,7 +986,10 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     _save_json(pdir / "analysis_context.json", {
         "classification_version": envelope["batch"]["version"],
         "classification_provider": envelope.get("provider", "rules"), "analysis_provider": analysis.provider,
-        "enrichment": "done" if (pdir / "enrichment.json").is_file() else "skipped", "pairs": pairs, "periods": periods,
+        "enrichment": "done" if (pdir / "enrichment.json").is_file() else "skipped",
+        "new_products_excluded_by_queue": queue_excluded,
+        "queue_filter": queue_filter,
+        "multi_node": len((_load_json(pdir / "coverage.json").get("nodes") or [])) > 1 if (pdir / "coverage.json").is_file() else False, "pairs": pairs, "periods": periods,
         "new_products_source": ({"artifact_id": "new-products", "name": Path(args.new_products_file).name,
             "kind": new_source.suffix.lstrip("."), "source": new_source.relative_to(pdir).as_posix(),
             "sha256": _sha256_file(new_source)} if args.new_products_file else None)})
@@ -950,7 +1019,7 @@ def cmd_analyze(args: argparse.Namespace) -> None:
                 for s in route_plan.suggestions
             ],
             "checkpoint_id": checkpoint.id,
-            "checkpoint_step": "route_review",
+            "checkpoint_step": "research_route_review",
             "next": "resolve --approve --select <route_id,...> 后进入 dossier",
         }
     )
@@ -1029,6 +1098,13 @@ def cmd_dossier(args: argparse.Namespace) -> None:
     if context.get("enrichment") != "done":
         missing_evidence.append("当前 CLI 未执行 ASIN 补全")
     missing_evidence.append("市场解释采用确定性模板，未调用 LLM 解释")
+    if context.get("queue_filter") == "skipped_no_launch_dates":
+        missing_evidence.append("新品表缺少上架时间:未做新品窗口/老带新过滤,留存率分母含全部输入 ASIN")
+    elif context.get("queue_filter") == "skipped_by_flag":
+        missing_evidence.append("已按用户要求跳过新品队列过滤(新品表须已人工预筛)")
+    if context.get("multi_node"):
+        missing_evidence.append("多节点合并样本:累计 BSR 层级/头腰尾/虹吸按各节点源 BSR 名次排序,跨节点名次不可直接比较;"
+                                "请以销量排序的单点名次矩阵为准")
     if new_products is None:
         missing_evidence.append("未提供新品跟踪表(new_products),T09 新品结论缺失")
 
@@ -1040,7 +1116,7 @@ def cmd_dossier(args: argparse.Namespace) -> None:
     approvals = svc.store.get_state(args.project).get("approved_checkpoints", {})
     evidence_names = ["records.json", "quality.json", "sources.json", "classification.json", "analysis_context.json",
                       "market_metrics.json", "market_analysis.json", "competition.json", "new_products.json", "route_plan.json",
-                      "new_product_queue.json", "iteration.json", "enrichment.json", "coverage.json", "nodes.json",
+                      "new_product_queue.json", "iteration.json", "enrichment.json", "coverage.json",
                       "table2_edits.json", "table_edits.json"]
     evidence_files = {name: pdir / name for name in evidence_names if (pdir / name).is_file()}
     evidence_files.update({source.sha256 + Path(source.source).suffix: (Path(source.source) if Path(source.source).is_absolute() else pdir / source.source) for source in sources})
@@ -1166,7 +1242,9 @@ def cmd_build_cross_channel(args: argparse.Namespace) -> None:
 
 TABLE1_COLUMNS = ["month", "asin", "brand", "title", "monthly_sales", "node_rank", "sales_rank", "seller_region",
                   "launch_date", "parent_asin", "seller_id", "rating", "rating_count"]
-TABLE1_EDITABLE = [c for c in TABLE1_COLUMNS if c not in {"month", "asin"}]
+# 只读列:sales_rank 由系统按销量重算;parent_asin/rating/rating_count 决定去重,改它们必须重新 ingest 才能重新去重
+TABLE1_READONLY = {"month", "asin", "sales_rank", "parent_asin", "rating", "rating_count"}
+TABLE1_EDITABLE = [c for c in TABLE1_COLUMNS if c not in TABLE1_READONLY]
 TABLE2_COLUMNS = ["asin", "title", "brand", "seller_region", "bullets"]
 TABLE3_COLUMNS = ["asin", "label", "confidence", "evidence", "needs_review", "review_reason"]
 BULLET_SEP = "||"
@@ -1261,7 +1339,10 @@ def _parse_table1(rows: list[dict[str, str]], current: list[BSRRecord]) -> tuple
                 except ValueError as exc:
                     raise ValueError(f"第 {number} 行 rating 必须是数字") from exc
             elif column == "seller_region":
-                value = normalize_seller_region(text)
+                region, account_type = split_region_and_account_type(text)
+                if account_type:
+                    raise ValueError(f"第 {number} 行 {text} 是账号类型而非地理国家,请填写卖家所属国家/地区")
+                value = region
             elif column in {"launch_date"}:
                 value = text or None
             else:
@@ -1301,17 +1382,33 @@ def _import_table1(svc: WorkflowService, args: argparse.Namespace, pdir: Path) -
     snapshot = _snapshot_source(pdir, Path(args.file))
     previous_hash = _sha256_file(pdir / "records.json")
 
-    _invalidate(svc, args.project, pdir, "collect_bsr")
+    coverage = _load_json(pdir / "coverage.json") if (pdir / "coverage.json").is_file() else None
+    edits_log = _load_json(pdir / "table_edits.json") if (pdir / "table_edits.json").is_file() else []
+    superseded = _invalidate(svc, args.project, pdir, "collect_bsr")
+    if coverage is not None:  # 缺月信息仍然适用于修改后的数据
+        _save_json(pdir / "coverage.json", coverage)
     by_month: dict[str, list[dict[str, Any]]] = {}
     for record in updated:
         by_month.setdefault(record.month, []).append(record.to_dict())
     _save_json(pdir / "records.json", by_month)
+    # 质量统计随人工修改重算,并标注"人工修改后",避免资料包沿用修改前的行数
+    quality = _load_json(pdir / "quality.json")
+    for month, month_rows in by_month.items():
+        entry = quality.setdefault(month, {"stats": {}, "quality": {}})
+        entry["stats"]["output_rows"] = len(month_rows)
+        entry["quality"].update({
+            "missing_title_rows": sum(1 for r in month_rows if not str(r.get("title") or "").strip()),
+            "missing_brand_rows": sum(1 for r in month_rows if not str(r.get("brand") or "").strip()),
+            "unknown_seller_region_rows": sum(1 for r in month_rows if r.get("seller_region") in ("", "UNKNOWN")),
+            "missing_rank_rows": sum(1 for r in month_rows if r.get("node_rank") is None),
+        })
+        entry["human_edited"] = True
+    _save_json(pdir / "quality.json", quality)
     sources = _load_json(pdir / "sources.json")
     artifact_id = f"table1-edit:{_sha256_file(snapshot)[:12]}"
     sources[artifact_id] = {"artifact_id": artifact_id, "name": f"人工校正表1 {Path(args.file).name}", "kind": "human_table1",
                             "source": snapshot.relative_to(pdir).as_posix(), "sha256": _sha256_file(snapshot)}
     _save_json(pdir / "sources.json", sources)
-    edits_log = _load_json(pdir / "table_edits.json") if (pdir / "table_edits.json").is_file() else []
     edits_log.append({"table": 1, "file_sha256": _sha256_file(snapshot), "changed_cells": changed,
                       "deleted_rows": deleted, "previous_records_sha256": previous_hash, "edited_at": utc_now_iso()})
     _save_json(pdir / "table_edits.json", edits_log)
@@ -1322,9 +1419,14 @@ def _import_table1(svc: WorkflowService, args: argparse.Namespace, pdir: Path) -
         args.project, "data_review",
         "表1 已被人工修改并重新上传,请复核修改后的月度数据;确认前下游不可继续。",
         {"months": summary, "sources": list(sources.values()), "source_mode": "human_table1",
-         "table_edit": edits_log[-1], "missing_months": [],
-         "artifact_hashes": _hashes(pdir, ["records.json", "quality.json", "sources.json", "table_edits.json"])})
+         "table_edit": edits_log[-1],
+         "missing_months": sorted(coverage["missing"]) if coverage else [],
+         "missing_reasons": coverage.get("missing_reasons", {}) if coverage else {},
+         "superseded_human_edits": superseded,
+         "artifact_hashes": _hashes(pdir, ["records.json", "quality.json", "sources.json", "table_edits.json"]
+                                    + (["coverage.json"] if coverage is not None else []))})
     _emit({"project_id": args.project, "table": 1, "changed_cells": changed, "deleted_rows": deleted,
+           "superseded_human_edits": superseded,
            "checkpoint_id": checkpoint.id, "checkpoint_step": "data_review",
            "next": "resolve --approve 重新确认表1 后再 classify"})
 
@@ -1349,8 +1451,9 @@ def _import_table2(svc: WorkflowService, args: argparse.Namespace, pdir: Path) -
                 regions[asin] = region
         if "bullets" in row:
             parsed = [b.strip() for b in row["bullets"].split(BULLET_SEP) if b.strip()]
-            changed += parsed != bullets.get(asin, [])
-            if parsed:
+            current_bullets = bullets.get(asin, [])
+            changed += parsed != current_bullets
+            if parsed or current_bullets:  # 清空也是显式的人工覆盖([]),机器补齐的卖点不会再回来
                 bullet_edits[asin] = parsed
     if changed == 0:
         raise ValueError("上传的表2与当前内容完全相同;没有需要重新审批的修改")
@@ -1516,6 +1619,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--retention-threshold", type=int, default=None,
                    help="留存达标销量阈值(默认回退 --survival-threshold/--sales-threshold,须人工确认)")
     p.add_argument("--study-month", help="研究当月 YYYY-MM;提供时校验新品输入最大月份必须一致")
+    p.add_argument("--skip-queue-filter", action="store_true",
+                   help="新品表已人工预筛时跳过新品队列过滤(默认:只统计通过新品窗口/老带新/人工排除过滤的 ASIN)")
     p.add_argument("--pair", action="append", default=[], help="份额分解对 YYYY-MM:YYYY-MM")
     p.add_argument("--period", action="append", default=[], help="跨期比较 a起点:a终点:b起点:b终点")
     p.set_defaults(func=cmd_analyze)
@@ -1556,43 +1661,61 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _restore_files(backups: dict[Path, bytes]) -> None:
+def _project_json_files(pdir: Path) -> list[Path]:
+    return sorted([*pdir.glob("*.json"), *(pdir / "external").glob("*.json")]) if pdir.is_dir() else []
+
+
+def _rollback_project_files(pdir: Path, backups: dict[Path, bytes]) -> None:
+    """事务回滚时让项目工件回到命令执行前:恢复被改写/删除的 json,删除命令新建的 json。"""
+    for path in _project_json_files(pdir):
+        if path not in backups:
+            path.unlink(missing_ok=True)
     for path, raw in backups.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
             handle.write(raw)
             temporary = Path(handle.name)
         temporary.replace(path)
 
 
+READ_ONLY_COMMANDS = {"login", "projects", "status", "init", "export-table"}
+
+
 def main(argv: list[str] | None = None) -> None:
+    logging.basicConfig(level=logging.WARNING, stream=sys.stderr, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = build_parser().parse_args(argv)
     backups: dict[Path, bytes] = {}
+    pdir: Path | None = None
     try:
         if args.command == "login":
             args.func(args)
             return
         svc = _service(args)
+        if getattr(args, "project", None) and args.command not in READ_ONLY_COMMANDS:
+            pdir = Path(args.root) / args.project
+            backups = {path: path.read_bytes() for path in _project_json_files(pdir)}
         # One DB write transaction serializes a complete CLI command across processes,
         # including reviewed file reads. Status API is experimental; do not share roots.
         output = io.StringIO()
         with redirect_stdout(output):
-            with svc.store.transaction(on_rollback=lambda: _restore_files(backups)):
-                if args.command == "resolve":
-                    pdir = Path(args.root) / args.project
-                    backups = {p: p.read_bytes() for p in [pdir / "classification.json", pdir / "route_plan.json"] if p.is_file()}
+            with svc.store.transaction(on_rollback=lambda: pdir and _rollback_project_files(pdir, backups)):
                 args.func(args)
         print(output.getvalue(), end="")
     except SystemExit:
         if "output" in locals():
             print(output.getvalue(), end="")
         raise
-    except (KeyError, ValueError, OSError, sqlite3.Error, ConnectorError) as exc:
+    except (KeyError, ValueError, OSError, sqlite3.Error, ConnectorError, RuntimeError) as exc:
+        logger.warning("command %s failed: %s: %s", args.command, type(exc).__name__, str(exc)[:300])
         _emit({"error": str(exc).strip('"'), "command": args.command})
+        sys.exit(1)
+    except Exception as exc:  # noqa: BLE001 - 最后防线:始终输出 JSON 错误(详情只进日志),不泄漏 traceback 给调用方
+        logger.exception("command %s crashed", args.command)
+        _emit({"error": f"内部错误({type(exc).__name__});详情见服务端日志", "command": args.command})
         sys.exit(1)
     finally:
         if hasattr(args, "_workflow_service"):
             args._workflow_service.store.close()
-
 
 
 if __name__ == "__main__":

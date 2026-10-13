@@ -71,7 +71,7 @@ $PY $ENGINE/scripts/run_research.py classify --project <ID> \
 $PY $ENGINE/scripts/run_research.py analyze --project <ID> \
     [--pair 2025-01:2026-01] [--period 2025-01:2025-04:2026-01:2026-04] \
     [--new-products-file <新品表>] [--sales-threshold 300 --consecutive-months 3] \
-    [--promotion-threshold N --retention-threshold N --study-month YYYY-MM]
+    [--promotion-threshold N --retention-threshold N --study-month YYYY-MM] [--skip-queue-filter]
   → 两个阈值（推起腰部销量 / 留存销量）须业务确认；提供 --study-month 时新品输入最大月份必须一致；
     同时产出 new_product_queue.json(新品队列、老带新排除清单)与 iteration.json(产品迭代进程)
   → 路线检查点 research_route_review
