@@ -105,3 +105,13 @@ def test_promotion_uses_separate_threshold_over_first_three_months():
 def test_promotion_disabled_without_threshold():
     r = analyze_new_products(_snaps("A", {"2026-01": 999, "2026-02": 999, "2026-03": 999}), NewProductConfig())
     assert r.summary.promotion_rate_pct is None and r.outcomes[0].promoted is None
+
+
+def test_rank_point_is_nth_position_not_raw_node_rank():
+    """已确认口径：按位次取第 N 名。名次有空缺/重复（去重、多节点合并）时仍按排序后的位次。"""
+    rows = [_rec("A", "2026-01", 100, 1), _rec("C", "2026-01", 70, 3), _rec("D", "2026-01", 60, 3)]
+    pts = {p.rank: p for p in build_competition_metrics(rows, rank_points=(1, 2, 3, 4)).rank_points}
+    assert (pts[1].asin, pts[1].sales) == ("A", 100)
+    assert (pts[2].asin, pts[2].sales) == ("C", 70)     # 原始排名 3 的商品，位次是第 2
+    assert (pts[3].asin, pts[3].sales) == ("D", 60)     # 重复排名按销量降序稳定排位
+    assert pts[4].asin is None and pts[4].sales is None  # 不存在的位次是未知，不是 0
