@@ -24,6 +24,9 @@ class NodeDiscoveryResult:
     sample_asin_count: int
     rows_without_asin: int
     rows_without_node: int
+    # 节点计数基于销量降序的 Top 样本而非全量;sampled=True 表示关键词总量大于样本。
+    sampled: bool = False
+    sample_rows: int = 0  # 实际取得的样本行数(含无 ASIN/无节点行)
 
 
 @dataclass(slots=True, frozen=True)

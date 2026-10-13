@@ -139,3 +139,48 @@ def test_merge_does_not_mutate_input():
     src = {"N1": [row("A1", "N1")]}
     merge_nodes_by_asin(src)
     assert src == {"N1": [row("A1", "N1")]}
+
+
+class _BigGateway:
+    """SellerSprite 假网关:总量 total,每页按 size 返回行(销量降序)。"""
+
+    def __init__(self, total):
+        self.total = total
+
+    async def list_tools(self, server_name):
+        return []
+
+    async def call_tool(self, server_name, tool_name, arguments=None):
+        params = arguments["params"]
+        page, size = params["page"], params["size"]
+        start = (page - 1) * size
+        n = max(0, min(size, self.total - start))
+        items = [{"asin": f"B{start + i:05d}", "nodeIdPath": "n1"} for i in range(n)]
+        return {"structured_content": {"items": items, "total": self.total}}
+
+
+def _discover_big(total):
+    from research_workflow.connectors import SellerSpriteConnector
+
+    return asyncio.run(
+        discover_nodes(SellerSpriteConnector(_BigGateway(total)), marketplace="US", keyword="kw")
+    )
+
+
+def test_discover_nodes_large_keyword_is_sampled_not_error():
+    result = _discover_big(2000)
+    assert result.sampled is True
+    assert result.sample_rows == 500  # page_size(100) * max_pages(5)
+    assert result.sample_asin_count == 500
+
+
+def test_discover_nodes_small_keyword_not_sampled():
+    result = _discover_big(230)
+    assert result.sampled is False
+    assert result.sample_rows == 230
+
+
+def test_discover_nodes_total_equals_limit_not_sampled():
+    result = _discover_big(500)
+    assert result.sampled is False
+    assert result.sample_rows == 500

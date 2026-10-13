@@ -102,6 +102,7 @@ class SellerSpriteConnector:
         raw_pages: list[Any] = []
         complete = False
         previous_page = None
+        reported_total: int | None = None  # 供应商声明的结果总量(未返回则为 None)
         seen_asins: set[str] = set()
         for page in range(1, max_pages + 1):
             params: dict[str, Any] = {
@@ -122,6 +123,8 @@ class SellerSpriteConnector:
             response = await self.call_operation("product_research", params)
             raw_pages.append(response.data)
             page_rows, total = _extract_rows_and_total(response.data)
+            if total is not None:
+                reported_total = total
             if page_rows and page_rows == previous_page:
                 raise ConnectorError("Repeated pagination page; results are incomplete")
             previous_page = page_rows
@@ -147,7 +150,7 @@ class SellerSpriteConnector:
         return ConnectorResponse(
             provider=self.SERVER,
             operation="product_research",
-            data={"items": rows, "count": len(rows)},
+            data={"items": rows, "count": len(rows), "total": reported_total},
             raw=raw_pages,
         )
 
