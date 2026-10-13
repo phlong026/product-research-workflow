@@ -66,6 +66,7 @@ RESEARCH_DB_PATH=runtime/api-experiment.db .venv/bin/python -m uvicorn research_
 | `new_products/` | T09 | launch success(连续达标)与 current survival 解耦,缺月=未知 |
 | `router/` | T10 | 规则化研究分支建议,人工 confirm 后生效 |
 | `dossier/` | T11 | JSON+CSV+Markdown+离线SVG HTML+SHA256 manifest |
+| `external_ingest.py` + `dossier/external.py` | T2-3~T2-7/T3-6~T3-9 | 外部证据登记(`import-evidence`,落 `external/`,索引哈希,**非检查点**)、预测/跨渠道接线、dossier「外部证据与预测」章节与 `外部_*` 工作表 |
 
 ## 代码约定
 

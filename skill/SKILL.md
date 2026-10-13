@@ -80,6 +80,31 @@ $PY $ENGINE/scripts/run_research.py dossier --project <ID> --output $ENGINE/runt
   → 生成 report.md / dashboard.html / data.json / csv/ / manifest.json
 ```
 
+外部证据登记与预测(**证据登记不是人工检查点**:不触发 resolve、不参与 data_review / classification_review 哈希,但会进入 dossier 的 `evidence/` 与 manifest):
+
+```bash
+# 登记外部证据(可在 ingest 之后任意时刻、多次执行;同 kind 追加为带序号的条目,不覆盖历史)
+$PY $ENGINE/scripts/run_research.py import-evidence --project <ID> \
+    --kind trends|report-excerpts|tiktok-units|patents|patent-search-log|ads|big-brand|offsite|cross-category \
+    --file <文件> [--meta key=value ...]
+  → 原文件按 SHA256 快照到 raw/,结构化结果存 external/<kind>.json,登记 external/index.json
+  → 校验失败(缺来源、含 GMV 字段、专利无检索日志…)原样输出库报错,不改任何状态
+  → 必填 --meta:trends = geo timeframe source_name source_url as_of;tiktok-units = source_name source_url as_of
+    (可选 low_growth high_growth);big-brand = brand product_type source_name retrieved_at(可选 aba_rank threshold url as_of);
+    cross-category = source_name retrieved_at(可选 url as_of brand);其余 kind 的来源列在文件内
+  → patent-search-log 要在 patents 之后导入才能把检索命中挂到专利记录上
+
+# analyze 之后的可选预测(预测值=外推,假设随结果登记;库拒绝缺覆盖率的跨口径外推)
+$PY $ENGINE/scripts/run_research.py build-market-forecast --project <ID> --horizon-years N \
+    [--method cagr|linear] [--granularity monthly|annual] [--low-growth g --high-growth g] \
+    [--target-scope amazon_channel|full_market --coverage-ratio R --coverage-source "来源说明"]
+  → market_metrics 月度销量只覆盖 Top 样本(--scope 只能是 top_sample);要报告更大口径必须带有来源的覆盖率
+  → 与 tiktok-units 对齐成同期间对比需要 --granularity annual(仅聚合 12 个月齐全的年份)
+$PY $ENGINE/scripts/run_research.py build-cross-channel --project <ID> [--geo us --segment countertop]
+  → forecast.json 与 tiktok-units 都存在时生成 Amazon×TikTok 事实整合(人工决策栏留空)
+```
+汇报时:带预测标签的数字必须说明是「预测·假设见下」;专利要区分「未检索」与「已检索-范围内未发现」并附「不构成法律意见」;来源不可访问/缺失的证据照报告原样转述,不补数。重新 analyze 或追加 tiktok-units 后需重跑 build-market-forecast / build-cross-channel,否则 dossier 会因证据过期而拒绝导出;篡改 external/ 下文件同样会被拒绝。
+
 三张表的人工校正(表1=清洗月度数据,表2=唯一 ASIN 的地区/卖点,表3=分类结果):
 
 ```bash

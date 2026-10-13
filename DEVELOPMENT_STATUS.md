@@ -31,11 +31,11 @@
 | T1-8 GPT 分类 | ✅🔌 | `classify --provider llm`(待人工拦截);真实模型输出未验收 |
 | T1-9 三表人工校正协议 | ⏳ | 数据/分类检查点已绑定哈希;表级导出-上传-失效协议未做 |
 | T2-1/T2-2/T2-4 | ✅🔌 | 透视、国别同比环比、季节性、产品迭代进程 |
-| T2-3/T2-5/T2-6/T2-7 | 🚧 | `market_external/` 进行中(导入器+确定性计算,不联网) |
+| T2-3/T2-5/T2-6/T2-7 | ✅🔌 | 库+接入已完成,待真实数据:`market_external/` 经 `import-evidence` / `build-market-forecast` / `build-cross-channel` 接入 CLI 与 dossier(「外部证据与预测」章节、`外部_*` 工作表);未经真实供应商数据验收 |
 | T2-8 三类深挖执行 | ⏳ | 未开始 |
 | T3-1/T3-2 | ✅🔌 | 卖家口径集中度、单点名次矩阵 |
 | T3-3/T3-4/T3-5 | ✅🔌 | 新品队列、原文口径留存率、双阈值 |
-| T3-6~T3-9 | 🚧 | `competition_external/` 进行中(证据账本,不联网) |
+| T3-6~T3-9 | ✅🔌 | 库+接入已完成,待真实数据:`competition_external/` 经 `import-evidence` 接入 CLI 与 dossier;证据登记不是检查点,`external/` 导出前校验索引哈希 |
 | T4-1~T4-3 执行器/Web/多人 | ⏳ | 未开始 |
 | T4-4 综合 Excel | ✅🔌 | `research_workbook.xlsx` |
 | T5/T6 | ⏳ | 未开始 |
