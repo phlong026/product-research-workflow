@@ -177,7 +177,8 @@ class ClassificationService:
             version=_version(schema, rows),
             rows=rows,
             approved=True,
-            human_edits=normalized_edits,
+            # 在此前的人工修改记录上合并本次 edits(同一 ASIN 以最新为准)
+            human_edits={**batch.human_edits, **normalized_edits},
         )
 
     def request_review_checkpoint(
