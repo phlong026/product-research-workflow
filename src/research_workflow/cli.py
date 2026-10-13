@@ -73,7 +73,7 @@ from research_workflow.enrichment.models import ASINProfile
 from research_workflow.mcp import MCPGateway, MCPRegistry
 from research_workflow.metrics import build_market_metrics
 from research_workflow.metrics.models import MarketMetricsResult
-from research_workflow.metrics import IterationConfig, build_iteration_comparison
+from research_workflow.metrics import IterationConfig, IterationResult, build_iteration_comparison
 from research_workflow.new_products import (
     NewProductConfig,
     NewProductSnapshot,
@@ -1051,6 +1051,8 @@ def cmd_dossier(args: argparse.Namespace) -> None:
                 )
                 for source in sources
             ],
+            iteration=(rebuild(IterationResult, _load_json(pdir / "iteration.json"))
+                       if (pdir / "iteration.json").is_file() else None),
             records=_load_records(pdir),
             classification=rebuild(ClassificationBatch, classification_envelope["batch"]),
             data_version=f"records.json@{records_hash[:12]}",
