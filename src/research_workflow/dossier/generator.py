@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from hashlib import sha256
 from html import escape
 import json
@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .models import ResearchDossierInput
+from .workbook import WORKBOOK_FILENAME, WORKBOOK_SKIPPED_NOTE, openpyxl_available, write_research_workbook
 
 
 class ResearchDossierGenerator:
@@ -20,16 +21,35 @@ class ResearchDossierGenerator:
     no automatic product decision field.
     """
 
-    def generate(self, dossier: ResearchDossierInput, output_dir: str | Path, *,
-                 evidence_files: dict[str, Path] | None = None,
-                 approval_history: dict | None = None) -> Path:
+    def generate(
+        self,
+        dossier: ResearchDossierInput,
+        output_dir: str | Path,
+        *,
+        evidence_files: dict[str, Path] | None = None,
+        approval_history: dict | None = None,
+        include_workbook: bool = True,
+        generated_at: str | None = None,
+    ) -> Path:
+        """Write the dossier bundle.
+
+        With ``include_workbook`` the comprehensive Excel workbook is added (and
+        hashed into the manifest). If openpyxl is missing it is skipped and the
+        gap is recorded in ``missing_evidence`` instead of failing the run.
+        """
+        write_workbook = include_workbook and openpyxl_available()
+        if include_workbook and not write_workbook:
+            dossier = replace(
+                dossier,
+                missing_evidence=[*dossier.missing_evidence, WORKBOOK_SKIPPED_NOTE],
+            )
         root = Path(output_dir)
         if root.is_symlink() or (root.exists() and (not root.is_dir() or any(root.iterdir()))):
             raise ValueError("导出目录必须为空或不存在;请使用新的版本目录保留旧研究资料包")
         root.parent.mkdir(parents=True, exist_ok=True)
         staging = Path(tempfile.mkdtemp(prefix=".dossier-", dir=root.parent))
         try:
-            self._generate_into(dossier, staging)
+            self._generate_into(dossier, staging, write_workbook=write_workbook, generated_at=generated_at)
             if evidence_files:
                 evidence_dir = staging / "evidence"
                 evidence_dir.mkdir()
@@ -47,7 +67,8 @@ class ResearchDossierGenerator:
                 shutil.rmtree(staging)
         return root
 
-    def _generate_into(self, dossier: ResearchDossierInput, root: Path) -> Path:
+    def _generate_into(self, dossier: ResearchDossierInput, root: Path, *,
+                       write_workbook: bool = False, generated_at: str | None = None) -> Path:
         root.mkdir(parents=True, exist_ok=True)
         csv_dir = root / "csv"
         csv_dir.mkdir(exist_ok=True)
@@ -58,6 +79,8 @@ class ResearchDossierGenerator:
         self._write_csvs(csv_dir, dossier)
         (root / "report.md").write_text(self._markdown(dossier), encoding="utf-8")
         (root / "dashboard.html").write_text(self._html(dossier), encoding="utf-8")
+        if write_workbook:
+            write_research_workbook(dossier, root / WORKBOOK_FILENAME, generated_at=generated_at)
         self._write_manifest(root)
         return root
 
