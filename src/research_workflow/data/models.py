@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
@@ -16,6 +16,10 @@ class BSRRecord:
     node_rank: int | None = None
     launch_date: str | None = None
     image_url: str | None = None
+    seller_id: str = ""
+    rating: float | None = None
+    rating_count: int | None = None
+    sales_rank: int | None = None  # 清洗后按销量降序重排的 1..N 名次;node_rank 保留源 BSR 名次
     source_row: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -56,9 +60,24 @@ class DataQualityReport:
         )
 
 
+@dataclass(slots=True, frozen=True)
+class DedupeAuditEntry:
+    """一条去重审计:removed_asin 因 rule 被折叠进 kept_asin。"""
+
+    month: str
+    rule: str
+    kept_asin: str
+    removed_asin: str
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 @dataclass(slots=True)
 class MonthlyBSRResult:
     month: str
     records: list[BSRRecord]
     stats: PipelineStats
     quality: DataQualityReport | None = None
+    dedupe_audit: list[DedupeAuditEntry] = field(default_factory=list)

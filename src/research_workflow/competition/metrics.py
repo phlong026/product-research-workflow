@@ -6,6 +6,7 @@ from typing import Iterable
 
 from research_workflow.data.models import BSRRecord
 
+from .rank_matrix import DEFAULT_POINT_RANKS, build_point_rank_matrix, compare_point_rank_matrices
 from .models import (
     CompetitionMetricsResult,
     ConcentrationMetric,
@@ -45,6 +46,7 @@ def build_competition_metrics(
     head_cutoff: int = 10,
     broad_cutoff: int = 100,
     rank_bands: tuple[tuple[int, int, str], ...] = DEFAULT_RANK_BANDS,
+    point_ranks: tuple[int, ...] = DEFAULT_POINT_RANKS,
 ) -> CompetitionMetricsResult:
     grouped: dict[str, list[BSRRecord]] = defaultdict(list)
     for record in records:
@@ -67,6 +69,21 @@ def build_competition_metrics(
             brand_sales[brand_key] += max(0, row.monthly_sales)
         brand_sorted = sorted(brand_sales.values(), reverse=True)
 
+        seller_sales: dict[str, int] = defaultdict(int)
+        unknown_seller_asins: set[str] = set()
+        unknown_seller_sales = 0
+        for row in rows:
+            seller_id = row.seller_id.strip()
+            sales = max(0, row.monthly_sales)
+            if seller_id:
+                seller_sales[f"seller:{seller_id}"] += sales
+            else:
+                # Missing seller must not collapse unrelated ASINs into one fake seller.
+                seller_sales[f"<unknown_seller:{row.asin}>"] += sales
+                unknown_seller_asins.add(row.asin)
+                unknown_seller_sales += sales
+        seller_sorted = sorted(seller_sales.values(), reverse=True)
+
         concentration.append(
             ConcentrationMetric(
                 month=month,
@@ -80,6 +97,11 @@ def build_competition_metrics(
                 ),
                 top3_brand_share_pct=_pct(sum(brand_sorted[:3]), total_sales),
                 top10_brand_share_pct=_pct(sum(brand_sorted[:10]), total_sales),
+                top3_seller_share_pct=_pct(sum(seller_sorted[:3]), total_sales),
+                top10_seller_share_pct=_pct(sum(seller_sorted[:10]), total_sales),
+                unknown_seller_sales=unknown_seller_sales,
+                unknown_seller_asin_count=len(unknown_seller_asins),
+                unknown_seller_share_pct=_pct(unknown_seller_sales, total_sales),
             )
         )
 
@@ -175,9 +197,17 @@ def build_competition_metrics(
             )
         )
 
+    # Single-rank (point) matrix lives next to the cumulative layers above; the two
+    # bases are never mixed. Siphon-style comparison must use the point changes.
+    point_matrix = build_point_rank_matrix(
+        (record for rows in grouped.values() for record in rows), ranks=point_ranks
+    )
+
     return CompetitionMetricsResult(
         concentration=concentration,
         rank_layers=rank_layers,
         rank_bands=rank_band_metrics,
         head_suction=head_suction,
+        point_rank_matrix=point_matrix,
+        point_rank_changes=compare_point_rank_matrices(point_matrix),
     )

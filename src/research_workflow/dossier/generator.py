@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from hashlib import sha256
 from html import escape
 import json
@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .models import ResearchDossierInput
+from . import external as external_section
+from . import sections
+from .workbook import WORKBOOK_FILENAME, WORKBOOK_SKIPPED_NOTE, openpyxl_available, write_research_workbook
 
 
 class ResearchDossierGenerator:
@@ -20,16 +23,35 @@ class ResearchDossierGenerator:
     no automatic product decision field.
     """
 
-    def generate(self, dossier: ResearchDossierInput, output_dir: str | Path, *,
-                 evidence_files: dict[str, Path] | None = None,
-                 approval_history: dict | None = None) -> Path:
+    def generate(
+        self,
+        dossier: ResearchDossierInput,
+        output_dir: str | Path,
+        *,
+        evidence_files: dict[str, Path] | None = None,
+        approval_history: dict | None = None,
+        include_workbook: bool = True,
+        generated_at: str | None = None,
+    ) -> Path:
+        """Write the dossier bundle.
+
+        With ``include_workbook`` the comprehensive Excel workbook is added (and
+        hashed into the manifest). If openpyxl is missing it is skipped and the
+        gap is recorded in ``missing_evidence`` instead of failing the run.
+        """
+        write_workbook = include_workbook and openpyxl_available()
+        if include_workbook and not write_workbook:
+            dossier = replace(
+                dossier,
+                missing_evidence=[*dossier.missing_evidence, WORKBOOK_SKIPPED_NOTE],
+            )
         root = Path(output_dir)
         if root.is_symlink() or (root.exists() and (not root.is_dir() or any(root.iterdir()))):
             raise ValueError("导出目录必须为空或不存在;请使用新的版本目录保留旧研究资料包")
         root.parent.mkdir(parents=True, exist_ok=True)
         staging = Path(tempfile.mkdtemp(prefix=".dossier-", dir=root.parent))
         try:
-            self._generate_into(dossier, staging)
+            self._generate_into(dossier, staging, write_workbook=write_workbook, generated_at=generated_at)
             if evidence_files:
                 evidence_dir = staging / "evidence"
                 evidence_dir.mkdir()
@@ -47,7 +69,8 @@ class ResearchDossierGenerator:
                 shutil.rmtree(staging)
         return root
 
-    def _generate_into(self, dossier: ResearchDossierInput, root: Path) -> Path:
+    def _generate_into(self, dossier: ResearchDossierInput, root: Path, *,
+                       write_workbook: bool = False, generated_at: str | None = None) -> Path:
         root.mkdir(parents=True, exist_ok=True)
         csv_dir = root / "csv"
         csv_dir.mkdir(exist_ok=True)
@@ -58,6 +81,8 @@ class ResearchDossierGenerator:
         self._write_csvs(csv_dir, dossier)
         (root / "report.md").write_text(self._markdown(dossier), encoding="utf-8")
         (root / "dashboard.html").write_text(self._html(dossier), encoding="utf-8")
+        if write_workbook:
+            write_research_workbook(dossier, root / WORKBOOK_FILENAME, generated_at=generated_at)
         self._write_manifest(root)
         return root
 
@@ -85,9 +110,11 @@ class ResearchDossierGenerator:
                 else None
             ),
             "research_route_plan": dossier.route_plan.to_dict() if dossier.route_plan else None,
+            "iteration": dossier.iteration.to_dict() if dossier.iteration else None,
             "source_artifacts": [asdict(source) for source in dossier.source_artifacts],
             "data_quality": list(dossier.data_quality),
             "missing_evidence": list(dossier.missing_evidence),
+            **({"external": dossier.external} if dossier.external is not None else {}),
         }
 
     @staticmethod
@@ -118,9 +145,35 @@ class ResearchDossierGenerator:
         self._write_dataclass_csv(
             csv_dir / "period_comparisons.csv", dossier.market_metrics.period_comparisons or []
         )
+        self._write_dataclass_csv(
+            csv_dir / "market_region_segments.csv", dossier.market_metrics.region_segments
+        )
+        self._write_dataclass_csv(
+            csv_dir / "market_seasonality.csv",
+            [
+                {**asdict(year), "missing_months": "、".join(year.missing_months)}
+                for year in dossier.market_metrics.seasonality.years
+            ],
+        )
         if dossier.competition_metrics:
             self._write_dataclass_csv(
                 csv_dir / "concentration.csv", dossier.competition_metrics.concentration
+            )
+            matrix = dossier.competition_metrics.point_rank_matrix
+            self._write_dataclass_csv(
+                csv_dir / "point_rank_matrix.csv",
+                [
+                    {
+                        "month": row.month,
+                        "ordering_basis": row.ordering_basis,
+                        "basis": row.basis,
+                        **{f"rank_{rank}": row.point_sales.get(str(rank)) for rank in matrix.ranks},
+                    }
+                    for row in matrix.rows
+                ],
+            )
+            self._write_dataclass_csv(
+                csv_dir / "point_rank_changes.csv", dossier.competition_metrics.point_rank_changes
             )
             self._write_dataclass_csv(
                 csv_dir / "rank_layers.csv", dossier.competition_metrics.rank_layers
@@ -132,6 +185,9 @@ class ResearchDossierGenerator:
                 csv_dir / "head_suction.csv", dossier.competition_metrics.head_suction
             )
         if dossier.new_product_analysis:
+            self._write_dataclass_csv(
+                csv_dir / "new_product_summary.csv", [asdict(dossier.new_product_analysis.summary)]
+            )
             self._write_dataclass_csv(
                 csv_dir / "new_product_outcomes.csv", dossier.new_product_analysis.outcomes
             )
@@ -147,6 +203,8 @@ class ResearchDossierGenerator:
                 csv_dir / "new_product_segments.csv",
                 dossier.new_product_analysis.segments,
             )
+        if dossier.iteration:
+            self._write_dataclass_csv(csv_dir / "product_iteration.csv", dossier.iteration.segments)
 
     @staticmethod
     def _write_dataclass_csv(path: Path, rows: Iterable[Any]) -> None:
@@ -175,6 +233,7 @@ class ResearchDossierGenerator:
             f"- Marketplace: `{dossier.marketplace}`",
             "- 最终商业判断：由人工完成；本报告仅提供研究材料。",
             "",
+            *sections.scope_markdown(),
             "## 0. 数据完整度与待补资料",
             "",
         ]
@@ -243,6 +302,17 @@ class ResearchDossierGenerator:
         else:
             lines.append("暂无卖家地区数据。")
 
+        _extend_blocks(
+            lines,
+            [
+                sections.region_segment_block(dossier),
+                sections.region_change_block(dossier),
+                sections.seasonality_block(dossier),
+                sections.iteration_block(dossier)
+                or sections.TableBlock("产品迭代进程", (), (), "本次运行未提供。"),
+            ],
+        )
+
         lines.extend(["", "## 3. 市场研究发现", ""])
         if dossier.market_analysis:
             lines.append(dossier.market_analysis.summary or "已完成研究分析。")
@@ -282,13 +352,21 @@ class ResearchDossierGenerator:
             latest_bands = [x for x in dossier.competition_metrics.rank_bands if x.month == latest_c.month]
             if latest_bands:
                 lines.append("")
-                lines.append("### BSR 头/腰/尾分层")
+                lines.append("### BSR 头/腰/尾分层（basis=cumulative，区间累计，非单点名次）")
                 lines.append("")
                 lines.extend(["| 分层 | 排名 | 销量 | 份额 | 同比 |", "|---|---|---:|---:|---:|"])
                 for band in latest_bands:
                     lines.append(f"| {band.band} | {band.start_rank}-{band.end_rank} | {band.sales:,} | {band.sales_share_pct:.2f}% | {_fmt_pct(band.yoy_pct)} |")
         else:
             lines.append("未提供竞争态势指标。")
+        _extend_blocks(
+            lines,
+            [
+                sections.concentration_block(dossier),
+                sections.point_rank_matrix_block(dossier),
+                sections.point_rank_change_block(dossier),
+            ],
+        )
 
         lines.extend(["", "## 5. 新品研究", ""])
         if dossier.new_product_analysis:
@@ -297,7 +375,8 @@ class ResearchDossierGenerator:
                 [
                     f"- 有效新品：{s.total_products}",
                     f"- 满足项目成功定义：{s.successful_products}",
-                    f"- 成功率：{s.success_rate_pct:.2f}%",
+                    f"- 成功率（下限，仅计已确认）：{s.success_rate_pct:.2f}%；因历史中间缺月无法判定的新品 {s.launch_success_unknown_products} 个，"
+                    f"含未知的上限 {_fmt_pct(s.success_rate_upper_bound_pct)}",
                     f"- 当前仍满足存活阈值：{s.surviving_successful_products}",
                     f"- 已成功新品当期观测覆盖率：{_fmt_pct(s.current_observation_coverage_pct)}；未观测 {s.unknown_successful_products} 个",
                     f"- 已观测成功新品存活率：{_fmt_pct(s.survival_rate_among_successful_pct)}（分母仅含已观测成功新品）",
@@ -310,6 +389,7 @@ class ResearchDossierGenerator:
                 lines.extend(["| 类型 | 新品数 | 成功数 | 成功率 |", "|---|---:|---:|---:|"])
                 for row in dossier.new_product_analysis.account_types:
                     lines.append(f"| {row.account_type} | {row.total_products} | {row.successful_products} | {row.success_rate_pct:.2f}% |")
+            _extend_blocks(lines, [sections.retention_block(dossier)])
         else:
             lines.append("未提供新品研究结果。")
         lines.extend(["", "## 6. 后续研究路线", ""])
@@ -335,6 +415,9 @@ class ResearchDossierGenerator:
                 )
         else:
             lines.append("暂无原始资料索引。")
+
+        if dossier.external is not None:
+            lines.extend(external_section.external_markdown(dossier.external))
 
         lines.extend([
             "",
@@ -381,6 +464,17 @@ class ResearchDossierGenerator:
         else:
             analysis_html = "<p>暂无研究发现。</p>"
 
+        extra_cards = "".join(
+            f'<div class="card">{sections.html_table(block)}</div>'
+            for block in sections.blocks_for_dashboard(dossier)
+        )
+        if dossier.external is not None:
+            extra_cards += (
+                f'<div class="card"><h2>{escape(external_section.TITLE)}</h2>'
+                + "".join(sections.html_table(b) for b in external_section.external_dashboard_blocks(dossier.external))
+                + "</div>"
+            )
+
         return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -393,6 +487,10 @@ main {{ max-width: 1180px; margin: 0 auto; padding: 32px 20px 56px; }}
 .card {{ background:white; border:1px solid #e5e7eb; border-radius:12px; padding:20px; margin:16px 0; }}
 .chart {{ width:100%; height:420px; }}
 .small {{ color:#667085; font-size:14px; }}
+.scroll {{ overflow-x:auto; }}
+table {{ border-collapse:collapse; font-size:13px; }}
+th, td {{ border:1px solid #e5e7eb; padding:4px 8px; text-align:right; white-space:nowrap; }}
+th:first-child, td:first-child {{ text-align:left; }}
 </style>
 
 </head>
@@ -402,6 +500,8 @@ main {{ max-width: 1180px; margin: 0 auto; padding: 32px 20px 56px; }}
 <div class="card"><h2>市场月销量</h2>{market_svg}</div>
 <div class="card"><h2>细分月销量</h2>{segments_svg}</div>
 <div class="card"><h2>研究发现</h2>{analysis_html}</div>
+<div class="card">{sections.scope_html()}</div>
+{extra_cards}
 <script id="chart-data" type="application/json">{chart_payload}</script>
 </main></body></html>
 """
@@ -420,12 +520,19 @@ main {{ max-width: 1180px; margin: 0 auto; padding: 32px 20px 56px; }}
         self._write_json(root / "manifest.json", {"files": entries})
 
 
-def _fmt_pct(value: float | None) -> str:
-    return "-" if value is None else f"{value:+.2f}%"
+def _extend_blocks(lines: list[str], blocks: Iterable[sections.TableBlock | None]) -> None:
+    for block in blocks:
+        if block is None:
+            continue
+        lines.append("")
+        if block.headers:
+            lines.extend(sections.markdown_table(block))
+        else:  # 数据缺失:只写标题与说明
+            lines.extend([f"### {block.title}", "", block.note])
 
 
-def _fmt_pp(value: float | None) -> str:
-    return "-" if value is None else f"{value:+.2f}pp"
+_fmt_pct = sections.fmt_pct
+_fmt_pp = sections.fmt_pp
 
 
 def _csv_cell(value: Any) -> Any:
@@ -439,7 +546,6 @@ def _svg_chart(months: list[str], series: list[tuple[str, list[int]]]) -> str:
     if not months:
         return "<p>暂无数据。</p>"
     maximum = max((v for _, values in series for v in values), default=0) or 1
-    width, height = 960, 320
     colors = ["#2563eb", "#059669", "#d97706", "#7c3aed", "#db2777"]
     parts = ['<svg viewBox="0 0 960 360" role="img" aria-label="月销量折线图" style="width:100%;height:auto">']
     for i in range(5):

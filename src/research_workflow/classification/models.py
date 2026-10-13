@@ -61,6 +61,12 @@ class ProductClassification:
     confidence: str = "medium"
     rationale: str = ""
     source: str = "llm"
+    # Verbatim source text backing the label. Descriptive only: never a conclusion.
+    evidence: str = ""
+    # True = machine could not classify reliably; a human must decide. Label is then
+    # the schema's unknown_label, never a guess.
+    needs_review: bool = False
+    review_reason: str = ""
 
 
 @dataclass(slots=True)

@@ -69,14 +69,17 @@ class RuleClassificationProvider:
                 if any(word in text for word in words)
             ]
             label = matches[0] if len(matches) == 1 else schema.unknown_label
-            rows.append(
-                {
-                    "asin": profile.asin,
-                    "label": label,
-                    "confidence": "high" if len(matches) == 1 else "low",
-                    "rationale": "keyword rule" if len(matches) == 1 else "ambiguous or no match",
-                }
-            )
+            row = {
+                "asin": profile.asin,
+                "label": label,
+                "confidence": "high" if len(matches) == 1 else "low",
+                "rationale": "keyword rule" if len(matches) == 1 else "ambiguous or no match",
+            }
+            if len(matches) > 1:
+                # 多标签同时命中无法自动取舍 -> 待人工;零命中是显式的"未归类",不进待人工
+                row["needs_review"] = True
+                row["review_reason"] = f"多个标签同时命中: {','.join(sorted(matches))}"
+            rows.append(row)
         return rows
 
 
@@ -99,8 +102,13 @@ class ClassificationService:
             if asin not in unique:
                 continue
             label = str(raw.get("label", schema.unknown_label)).strip()
+            needs_review = bool(raw.get("needs_review", False))
+            review_reason = str(raw.get("review_reason", "")).strip()
             if label not in schema.allowed_labels:
+                # Never invent a class: an out-of-schema label goes to a human.
                 label = schema.unknown_label
+                needs_review = True
+                review_reason = review_reason or "label not in schema"
             confidence = str(raw.get("confidence", "medium")).lower()
             if confidence not in {"high", "medium", "low"}:
                 confidence = "medium"
@@ -110,6 +118,9 @@ class ClassificationService:
                 confidence=confidence,
                 rationale=str(raw.get("rationale", "")).strip(),
                 source=self.provider.name,
+                evidence=str(raw.get("evidence", "")).strip(),
+                needs_review=needs_review,
+                review_reason=review_reason,
             )
 
         # Every requested ASIN must be represented so nothing silently disappears.
@@ -122,6 +133,8 @@ class ClassificationService:
                     confidence="low",
                     rationale="provider returned no classification",
                     source=self.provider.name,
+                    needs_review=True,
+                    review_reason="provider returned no classification",
                 ),
             )
 
@@ -164,7 +177,8 @@ class ClassificationService:
             version=_version(schema, rows),
             rows=rows,
             approved=True,
-            human_edits=normalized_edits,
+            # 在此前的人工修改记录上合并本次 edits(同一 ASIN 以最新为准)
+            human_edits={**batch.human_edits, **normalized_edits},
         )
 
     def request_review_checkpoint(
@@ -188,12 +202,7 @@ def _version(schema: ClassificationSchema, rows: dict[str, ProductClassification
     payload = {
         "schema_hash": schema.schema_hash,
         "rows": {
-            asin: {
-                "label": row.label,
-                "confidence": row.confidence,
-                "source": row.source,
-            }
-            for asin, row in sorted(rows.items())
+            asin: _row_fingerprint(row) for asin, row in sorted(rows.items())
         },
     }
     digest = sha256(
@@ -202,3 +211,16 @@ def _version(schema: ClassificationSchema, rows: dict[str, ProductClassification
         )
     ).hexdigest()[:12]
     return f"cls-{digest}"
+
+
+def _row_fingerprint(row: ProductClassification) -> dict[str, Any]:
+    fingerprint: dict[str, Any] = {
+        "label": row.label,
+        "confidence": row.confidence,
+        "source": row.source,
+    }
+    # Only present when set, so versions of batches without review flags stay unchanged.
+    # evidence/rationale are descriptive text and deliberately excluded from the version.
+    if row.needs_review:
+        fingerprint["needs_review"] = True
+    return fingerprint

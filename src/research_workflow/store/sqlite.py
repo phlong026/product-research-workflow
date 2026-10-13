@@ -34,7 +34,7 @@ class SQLiteStore:
         self._transaction_depth = 0
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path, check_same_thread=False)
+        self._conn = sqlite3.connect(self.path, check_same_thread=False, timeout=60)  # 长命令(联网取数)期间持有写事务,其它命令最多等待 60 秒
         self._conn.row_factory = sqlite3.Row
         self._migrate()
 
