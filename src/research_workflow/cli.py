@@ -985,6 +985,7 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     new_product_queue = None
     queue_excluded = 0
     queue_filter = "no_new_products_file"
+    new_products_skipped_reason: str | None = None
     if args.new_products_file:
         new_source = _snapshot_source(pdir, Path(args.new_products_file))
         rows = read_tabular_rows(new_source)
@@ -1020,18 +1021,28 @@ def cmd_analyze(args: argparse.Namespace) -> None:
             if not analysis_snapshots:
                 raise ValueError("新品队列为空:没有 ASIN 通过新品窗口/老带新/人工排除过滤;"
                                  "若新品表已人工预筛,请加 --skip-queue-filter")
-        new_products = analyze_new_products(
-            analysis_snapshots,
-            NewProductConfig(
-                sales_threshold=args.sales_threshold,
-                consecutive_months=args.consecutive_months,
-                early_threshold_window_months=args.early_window,
-                current_survival_threshold=args.survival_threshold,
-                promotion_waist_sales_threshold=args.promotion_threshold,
-                retention_sales_threshold=args.retention_threshold,
-                study_month=args.study_month,
-            ),
-        )
+        # 推起阈值(人工腰部销量)与留存阈值是业务数值,没有内置默认:未设置就不算新品指标并如实披露
+        promotion_threshold = args.promotion_threshold if args.promotion_threshold is not None else args.sales_threshold
+        retention_threshold = next((v for v in (args.retention_threshold, args.survival_threshold, args.sales_threshold)
+                                    if v is not None), None)
+        absent = [name for name, value in (("推起阈值(--promotion-threshold,人工腰部销量)", promotion_threshold),
+                                          ("留存阈值(--retention-threshold)", retention_threshold)) if value is None]
+        if absent:
+            new_products_skipped_reason = ("未设置" + "、".join(absent) + ",新品指标未计算"
+                                           "(系统不使用内置默认数值;请由业务给出后重新 analyze)")
+        else:
+            new_products = analyze_new_products(
+                analysis_snapshots,
+                NewProductConfig(
+                    sales_threshold=args.sales_threshold if args.sales_threshold is not None else promotion_threshold,
+                    consecutive_months=args.consecutive_months,
+                    early_threshold_window_months=args.early_window,
+                    current_survival_threshold=args.survival_threshold,
+                    promotion_waist_sales_threshold=promotion_threshold,
+                    retention_sales_threshold=retention_threshold,
+                    study_month=args.study_month,
+                ),
+            )
 
     route_plan = ResearchRouter().suggest(market, competition, new_products)
     last_month = max(record.month for record in records)  # 取数据最大月份的月末,同输入同输出(不依赖今天的日期)
@@ -1054,6 +1065,7 @@ def cmd_analyze(args: argparse.Namespace) -> None:
         "enrichment": "done" if (pdir / "enrichment.json").is_file() else "skipped",
         "new_products_excluded_by_queue": queue_excluded,
         "queue_filter": queue_filter,
+        "new_products_skipped_reason": new_products_skipped_reason,
         "multi_node": len((_load_json(pdir / "coverage.json").get("nodes") or [])) > 1 if (pdir / "coverage.json").is_file() else False, "pairs": pairs, "periods": periods,
         "new_products_source": ({"artifact_id": "new-products", "name": Path(args.new_products_file).name,
             "kind": new_source.suffix.lstrip("."), "source": new_source.relative_to(pdir).as_posix(),
@@ -1171,7 +1183,8 @@ def cmd_dossier(args: argparse.Namespace) -> None:
         missing_evidence.append("多节点合并样本:累计 BSR 层级/头腰尾/虹吸按各节点源 BSR 名次排序,跨节点名次不可直接比较;"
                                 "请以销量排序的单点名次矩阵为准")
     if new_products is None:
-        missing_evidence.append("未提供新品跟踪表(new_products),T09 新品结论缺失")
+        missing_evidence.append(context.get("new_products_skipped_reason")
+                                or "未提供新品跟踪表(new_products),T09 新品结论缺失")
 
     # 外部证据(证据登记,非检查点):导出前校验 index.json 登记的哈希,篡改/过期即报错
     external = external_ingest.load_external(pdir) or external_ingest.empty_external()
@@ -1723,14 +1736,15 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("analyze", help="市场/竞争/新品确定性分析 + 研究路线建议")
     p.add_argument("--project", required=True)
     p.add_argument("--new-products-file")
-    p.add_argument("--sales-threshold", type=int, default=250)
+    p.add_argument("--sales-threshold", type=int, default=None,
+                   help="旧版统一阈值(无默认值);仅在未单独给 --promotion-threshold/--retention-threshold 时作为二者的回退")
     p.add_argument("--consecutive-months", type=int, default=3)
     p.add_argument("--early-window", type=int, default=3)
     p.add_argument("--survival-threshold", type=int, default=None)
     p.add_argument("--promotion-threshold", type=int, default=None,
-                   help="推起成功的人工腰部销量阈值(默认回退 --sales-threshold,须人工确认)")
+                   help="推起成功的人工腰部销量阈值;无内置默认,未设置则不计算新品指标(可回退到显式给出的 --sales-threshold)")
     p.add_argument("--retention-threshold", type=int, default=None,
-                   help="留存达标销量阈值(默认回退 --survival-threshold/--sales-threshold,须人工确认)")
+                   help="留存达标销量阈值;无内置默认,未设置则不计算新品指标(可回退到显式给出的 --survival-threshold/--sales-threshold)")
     p.add_argument("--study-month", help="研究当月 YYYY-MM;提供时校验新品输入最大月份必须一致")
     p.add_argument("--skip-queue-filter", action="store_true",
                    help="新品表已人工预筛时跳过新品队列过滤(默认:只统计通过新品窗口/老带新/人工排除过滤的 ASIN)")

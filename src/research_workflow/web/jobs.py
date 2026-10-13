@@ -75,7 +75,7 @@ class ResolveParams(_Params):
 
 class AnalyzeParams(_Params):
     new_products_upload: str | None = None
-    sales_threshold: int = Field(default=250, ge=0)
+    sales_threshold: int | None = Field(default=None, ge=0)
     consecutive_months: int = Field(default=3, ge=1, le=24)
     early_window: int = Field(default=3, ge=1, le=24)
     survival_threshold: int | None = Field(default=None, ge=0)

@@ -61,7 +61,7 @@ uv pip install -e '.[dev,workflow,data,xlsx]' -p .venv
 | `ingest` | 文件模式 `{uploads:[upload_id...], month?, top_n?}`;取数模式 `{live:true, keyword, months:"auto"或"2025-01,2026-01", nodes?:[nodeIdPath...], candidate_n?, top_n?}` → 进入 `data_review` 检查点 |
 | `enrich` | `{}` → 商品补齐(需 MCP 会话),完成后进入 `enrichment_review` 检查点,**确认前不能分类** |
 | `classify` | `{labels:{key:名称}, rules?:{key:"词1,词2"}, dimension?, provider?: rules\|llm}` → `classification_review` 检查点(不再支持 `enrich` 参数,补齐是独立步骤);`needs_review` 行必须在 resolve 时用 `edits` 指定 |
-| `analyze` | `{new_products_upload?, sales_threshold?, consecutive_months?, early_window?, promotion_threshold?, retention_threshold?, study_month?, pairs?, periods?}` → `research_route_review` 检查点 |
+| `analyze` | `{new_products_upload?, sales_threshold?(无默认,仅作回退), consecutive_months?, early_window?, promotion_threshold?, retention_threshold?, study_month?, pairs?, periods?}` → `research_route_review` 检查点 |
 | `resolve` | `{checkpoint_id, approve: bool, edits?:{ASIN:标签}, select?:[route_id...]}` —— **只能由用户明确点击触发,前端不得自动批准** |
 | `reconcile` | `{upload}`(参考表,列 key,expected[,tolerance_abs,tolerance_pct]) → 只读对账,结果写 `exports/reconcile.csv` |
 | `export-table` | `{table: 1\|2\|3}` → 生成 `exports/table{n}.csv`,经 exports 接口下载 |
