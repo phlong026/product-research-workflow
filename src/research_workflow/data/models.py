@@ -16,6 +16,10 @@ class BSRRecord:
     node_rank: int | None = None
     launch_date: str | None = None
     image_url: str | None = None
+    seller_id: str = ""
+    rating: float | None = None
+    rating_count: int | None = None
+    sales_rank: int | None = None  # 清洗后按销量降序重排的 1..N 名次;node_rank 保留源 BSR 名次
     source_row: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
