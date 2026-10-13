@@ -48,6 +48,7 @@ from research_workflow.competition.models import CompetitionMetricsResult
 from research_workflow.data import MonthlyBSRConfig, build_monthly_top
 from research_workflow.data.io import read_tabular_rows
 from research_workflow.data.models import BSRRecord, MonthlyBSRResult
+from research_workflow.data.nodes import discover_nodes, merge_node_rows
 from research_workflow.data.bsr_pipeline import validate_month, _to_int
 from research_workflow.connectors.base import ConnectorError
 from research_workflow.connectors.sellersprite import SellerSpriteConnector
@@ -289,6 +290,36 @@ def cmd_init(args: argparse.Namespace) -> None:
     )
 
 
+NO_NODE = "_all"
+
+
+def source_month(artifact_id: str) -> str:
+    return artifact_id.split(":", 1)[0]
+
+
+def _safe_node(node: str) -> str:
+    return re.sub(r"[^0-9A-Za-z_-]+", "_", node).strip("_") or "node"
+
+
+def _confirmed_nodes(pdir: Path) -> list[str] | None:
+    path = pdir / "nodes.json"
+    if not path.exists():
+        return None
+    confirmed = _load_json(path).get("confirmed")
+    return list(confirmed["nodes"]) if confirmed else None
+
+
+def _resolve_nodes(args: argparse.Namespace, pdir: Path) -> list[str | None]:
+    requested = [n.strip() for n in (getattr(args, "node", None) or []) if n.strip()]
+    confirmed = _confirmed_nodes(pdir)
+    if confirmed is not None:
+        outside = [n for n in requested if n not in confirmed]
+        if outside:
+            raise ValueError(f"节点未经人工确认: {outside};先 nodes confirm，或改用已确认节点 {confirmed}")
+        return requested or list(confirmed)
+    return requested or [None]
+
+
 def _bsr_config(args: argparse.Namespace) -> MonthlyBSRConfig:
     return MonthlyBSRConfig(
         top_n=args.top_n,
@@ -304,6 +335,7 @@ def _persist_ingest(
     results: list[MonthlyBSRResult],
     sources: dict[str, Any],
     source_mode: str,
+    candidates: dict[str, dict[str, list[dict[str, Any]]]] | None = None,
 ) -> None:
     by_month: dict[str, list[dict[str, Any]]] = (
         _load_json(pdir / "records.json") if (pdir / "records.json").exists() else {}
@@ -331,9 +363,11 @@ def _persist_ingest(
             "dedupe_unjudgeable_rows": result.quality.dedupe_unjudgeable_rows,
             "warnings": result.quality.warning_count,
         }
-    replaced_months = {result.month for result in results}
+    # 只替换同月同节点的旧来源；同月其它节点的来源必须保留（多节点合并研究）。
+    replaced = {(source_month(key), value.get("node") or NO_NODE) for key, value in sources.items()
+                for value in [value]}
     all_sources = {key: value for key, value in all_sources.items()
-                   if key.split(":", 1)[0] not in replaced_months}
+                   if (source_month(key), value.get("node") or NO_NODE) not in replaced}
     all_sources.update(sources)
     if not results or any(not result.records for result in results):
         raise ValueError("每个导入月份必须有有效数据;空数据不能作为零销量市场进入分析")
@@ -341,6 +375,8 @@ def _persist_ingest(
         raise ValueError("存在缺失/非法销量;请修正源数据后重新导入，不能将缺失视为零销量")
     _invalidate(svc, args.project, pdir, "collect_bsr")
 
+    if candidates is not None:
+        _save_json(pdir / "candidates.json", candidates)
     _save_json(pdir / "records.json", by_month)
     _save_json(pdir / "quality.json", quality)
     _save_json(pdir / "sources.json", all_sources)
@@ -363,6 +399,28 @@ def _persist_ingest(
             "next": "resolve --approve 后进入 classify",
         }
     )
+
+
+def _build_month_results(
+    args: argparse.Namespace, pdir: Path, batches: list[tuple[str, str, list[dict[str, Any]]]]
+) -> list[MonthlyBSRResult]:
+    """把本次导入的 (月, 节点, 行) 并入候选池，再按月把所有节点合并后清洗出 TopN。"""
+    candidates: dict[str, dict[str, list[dict[str, Any]]]] = (
+        _load_json(pdir / "candidates.json") if (pdir / "candidates.json").exists() else {}
+    )
+    for month, node, rows in batches:
+        month_nodes = candidates.setdefault(month, {})
+        if node == NO_NODE and any(n != NO_NODE for n in month_nodes) or \
+                node != NO_NODE and NO_NODE in month_nodes:
+            raise ValueError(f"{month} 不能混用“无节点导入”与“按节点导入”；请统一口径后重新导入")
+        month_nodes[node] = rows
+    args._candidates = candidates
+    results: list[MonthlyBSRResult] = []
+    for month in dict.fromkeys(month for month, _, _ in batches):
+        month_nodes = candidates[month]
+        rows = month_nodes[NO_NODE] if list(month_nodes) == [NO_NODE] else merge_node_rows(month_nodes)
+        results.append(build_monthly_top(rows, month, _bsr_config(args)))
+    return results
 
 
 async def _fetch_live(args: argparse.Namespace, pdir: Path) -> tuple[list[MonthlyBSRResult], dict[str, Any]]:
@@ -391,32 +449,39 @@ async def _fetch_live(args: argparse.Namespace, pdir: Path) -> tuple[list[Monthl
             )
             or 1
         )
-    results: list[MonthlyBSRResult] = []
     sources: dict[str, Any] = {}
     raw_dir = pdir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
+    batches: list[tuple[str, str, list[dict[str, Any]]]] = []
     for month in months:
-        response = await connector.product_research(
-            marketplace=args.marketplace,
-            keyword=args.keyword,
-            month=month,
-            page_size=args.page_size,
-            max_pages=args.max_pages,
-        )
-        rows = response.data.get("items", []) if isinstance(response.data, dict) else []
-        raw_path = raw_dir / f"{month}.json"
-        _save_json(raw_path, {"provider": "sellersprite", "operation": "product_research", "rows": rows,
-                              "response_pages": response.raw, "request_scope": {"month": month, "marketplace": args.marketplace, "keyword": args.keyword}})
-        results.append(build_monthly_top(rows, month, _bsr_config(args)))
-        snapshot = _snapshot_source(pdir, raw_path)
-        artifact_id = f"{month}:sellersprite"
-        sources[artifact_id] = {
-            "artifact_id": artifact_id,
-            "name": f"sellersprite product_research {month}",
-            "kind": "mcp",
-            "source": snapshot.relative_to(pdir).as_posix(),
-            "sha256": _sha256_file(snapshot),
-        }
+        for node in _resolve_nodes(args, pdir):
+            response = await connector.product_research(
+                marketplace=args.marketplace,
+                keyword=args.keyword,
+                month=month,
+                node_id_paths=[node] if node else None,
+                page_size=args.page_size,
+                max_pages=args.max_pages,
+            )
+            rows = response.data.get("items", []) if isinstance(response.data, dict) else []
+            tag = f"{month}__{_safe_node(node)}" if node else month
+            raw_path = raw_dir / f"{tag}.json"
+            _save_json(raw_path, {"provider": "sellersprite", "operation": "product_research", "rows": rows,
+                                  "response_pages": response.raw,
+                                  "request_scope": {"month": month, "marketplace": args.marketplace,
+                                                    "keyword": args.keyword, "node": node}})
+            batches.append((month, node or NO_NODE, rows))
+            snapshot = _snapshot_source(pdir, raw_path)
+            artifact_id = f"{month}:{node}:sellersprite" if node else f"{month}:sellersprite"
+            sources[artifact_id] = {
+                "artifact_id": artifact_id,
+                "name": f"sellersprite product_research {month}" + (f" node={node}" if node else ""),
+                "kind": "mcp",
+                "node": node or NO_NODE,
+                "source": snapshot.relative_to(pdir).as_posix(),
+                "sha256": _sha256_file(snapshot),
+            }
+    results = _build_month_results(args, pdir, batches)
     if results and all(result.stats.parsed_rows == 0 for result in results):
         raise SystemExit(
             _emit(
@@ -447,15 +512,20 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         if not args.keyword:
             raise ValueError("live 模式必须提供 --keyword 或项目 primary_keyword，避免无范围取数")
         results, sources = asyncio.run(_fetch_live(args, pdir))
-        _persist_ingest(svc, args, pdir, results, sources, source_mode="mcp:sellersprite")
+        _persist_ingest(svc, args, pdir, results, sources, source_mode="mcp:sellersprite",
+                        candidates=getattr(args, "_candidates", None))
         return
 
     if not args.months:
         args.months = None
     if not args.file:
         raise SystemExit(_emit({"error": "文件模式必须至少提供一个 --file;直连模式用 --live"}) or 1)
-    results: list[MonthlyBSRResult] = []
     sources: dict[str, Any] = {}
+    batches: list[tuple[str, str, list[dict[str, Any]]]] = []
+    nodes = _resolve_nodes(args, pdir)
+    if len(nodes) != 1:
+        raise ValueError("文件模式一次导入只能指定一个 --node；多个节点请分次导入后自动合并")
+    node = nodes[0]
     for file_name in args.file:
         path = Path(file_name)
         if not path.exists():
@@ -463,16 +533,19 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         month = _resolve_month(args, path)
         snapshot = _snapshot_source(pdir, path)
         rows = read_tabular_rows(snapshot)
-        results.append(build_monthly_top(rows, month, _bsr_config(args)))
-        artifact_id = f"{month}:{path.name}"
+        batches.append((month, node or NO_NODE, rows))
+        artifact_id = f"{month}:{node}:{path.name}" if node else f"{month}:{path.name}"
         sources[artifact_id] = {
             "artifact_id": artifact_id,
             "name": path.name,
             "kind": path.suffix.lstrip(".") or "file",
+            "node": node or NO_NODE,
             "source": snapshot.relative_to(pdir).as_posix(),
             "sha256": _sha256_file(snapshot),
         }
-    _persist_ingest(svc, args, pdir, results, sources, source_mode="file")
+    results = _build_month_results(args, pdir, batches)
+    _persist_ingest(svc, args, pdir, results, sources, source_mode="file",
+                    candidates=getattr(args, "_candidates", None))
 
 
 def cmd_login(args: argparse.Namespace) -> None:
@@ -658,6 +731,73 @@ def cmd_resolve(args: argparse.Namespace) -> None:
             "next": next_action,
         }
     )
+
+
+def cmd_nodes_discover(args: argparse.Namespace) -> None:
+    """用产品关键词取样，统计类目节点分布，提议主节点/相关节点（须人工 nodes-confirm）。"""
+    svc = _service(args)
+    project = svc.store.get_project(args.project)
+    if project is None:
+        raise KeyError(f"Unknown project: {args.project}")
+    pdir = _project_dir(args, args.project)
+    if args.live:
+        keyword = args.keyword or project.primary_keyword
+        if not keyword:
+            raise ValueError("live 节点发现必须提供 --keyword 或项目 primary_keyword")
+        _load_dotenv(ROOT / ".env")
+        connector = SellerSpriteConnector(_build_gateway(ROOT / "config" / "mcp.json"))
+
+        async def sample() -> list[dict[str, Any]]:
+            await connector.validate()
+            response = await connector.product_research(
+                marketplace=project.marketplace, keyword=keyword, month=args.month,
+                page_size=100, max_pages=args.max_pages)
+            return response.data.get("items", []) if isinstance(response.data, dict) else []
+
+        rows = asyncio.run(sample())
+        origin: dict[str, Any] = {"mode": "live", "keyword": keyword, "month": args.month}
+    else:
+        if not args.file:
+            raise SystemExit(_emit({"error": "需要 --file 样本文件，或使用 --live --keyword"}) or 1)
+        path = Path(args.file)
+        snapshot = _snapshot_source(pdir, path)
+        rows = read_tabular_rows(snapshot)
+        origin = {"mode": "file", "source": snapshot.relative_to(pdir).as_posix(),
+                  "sha256": _sha256_file(snapshot)}
+    proposal = discover_nodes(rows)
+    if proposal.primary is None:
+        raise SystemExit(_emit({
+            "error": "样本中没有可识别的类目节点字段",
+            "remedy": "对照原始快照确认节点字段名后补充 data/nodes.py 的 NODE_ID_ALIASES；或直接人工指定 nodes-confirm --allow-unlisted",
+            "sampled_rows": proposal.sampled_rows}) or 1)
+    _save_json(pdir / "nodes.json", {"origin": origin, "proposal": proposal.to_dict(), "confirmed": None})
+    _emit({"project_id": args.project, "proposal": proposal.to_dict(),
+           "next": "人工检查后运行 nodes-confirm --node <主节点> [--node <相关节点>...]"})
+
+
+def cmd_nodes_confirm(args: argparse.Namespace) -> None:
+    svc = _service(args)
+    if svc.store.get_project(args.project) is None:
+        raise KeyError(f"Unknown project: {args.project}")
+    pdir = _project_dir(args, args.project)
+    path = pdir / "nodes.json"
+    doc = _load_json(path) if path.exists() else {"origin": {"mode": "manual"}, "proposal": None, "confirmed": None}
+    nodes = list(dict.fromkeys(n.strip() for n in args.node if n.strip()))
+    if not nodes:
+        raise ValueError("至少确认一个节点")
+    primary = args.primary or nodes[0]
+    if primary not in nodes:
+        raise ValueError("--primary 必须在确认的节点内")
+    proposal = doc.get("proposal")
+    if proposal and not args.allow_unlisted:
+        listed = {c["node_id"] for c in ([proposal["primary"]] if proposal["primary"] else []) + proposal["related"] + proposal["others"]}
+        unknown = [n for n in nodes if n not in listed]
+        if unknown:
+            raise ValueError(f"节点不在发现结果内: {unknown}；确认是人工指定请加 --allow-unlisted")
+    doc["confirmed"] = {"nodes": nodes, "primary": primary, "allow_unlisted": bool(args.allow_unlisted)}
+    _save_json(path, doc)
+    _emit({"project_id": args.project, "confirmed": doc["confirmed"],
+           "next": "ingest --live --months ... （默认使用已确认节点；各节点按月分别取数后合并去重）"})
 
 
 def cmd_analyze(args: argparse.Namespace) -> None:
@@ -915,11 +1055,29 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dedupe-title", action="store_true", help="启用旧口径：品牌+标题去重（可能误删，需人工抽查）")
     p.add_argument("--live", action="store_true", help="通过 MCP 直连 SellerSprite 取数")
     p.add_argument("--marketplace", help="live 模式站点;默认取项目站点")
+    p.add_argument("--node", action="append", default=[],
+                   help="类目节点；可多次。多个节点分别取数后在月内合并去重（已确认节点见 nodes confirm）")
     p.add_argument("--keyword", help="live 模式调研关键词")
     p.add_argument("--months", help="live 模式月份列表,如 2025-01,2026-01")
     p.add_argument("--page-size", type=int, default=100)
     p.add_argument("--max-pages", type=int, default=20)
     p.set_defaults(func=cmd_ingest)
+
+    p = sub.add_parser("nodes-discover", help="按产品关键词发现类目节点并提议主节点（需人工确认）")
+    p.add_argument("--project", required=True)
+    p.add_argument("--file", help="取样结果文件（含节点字段）")
+    p.add_argument("--live", action="store_true")
+    p.add_argument("--keyword")
+    p.add_argument("--month", help="取样月份 YYYY-MM；缺省由接口决定")
+    p.add_argument("--max-pages", type=int, default=3)
+    p.set_defaults(func=cmd_nodes_discover)
+
+    p = sub.add_parser("nodes-confirm", help="人工确认研究使用的类目节点")
+    p.add_argument("--project", required=True)
+    p.add_argument("--node", action="append", default=[], required=True)
+    p.add_argument("--primary")
+    p.add_argument("--allow-unlisted", action="store_true", help="允许确认发现结果之外、由人工指定的节点")
+    p.set_defaults(func=cmd_nodes_confirm)
 
     p = sub.add_parser("login", help="触发 SellerSprite MCP 登录流程(CDP Chrome)")
     p.add_argument("--wait", type=int, default=180)

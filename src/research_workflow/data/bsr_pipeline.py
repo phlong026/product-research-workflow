@@ -111,6 +111,7 @@ def parse_bsr_row(row: dict[str, Any], month: str, *, merge_cn_hk: bool = True) 
         seller=str(_first(row, ALIASES["seller"], "")).strip(),
         rating=_to_float(_first(row, ALIASES["rating"], None)),
         rating_count=_to_int(_first(row, ALIASES["rating_count"], None), None),
+        node_ids=[str(n) for n in (row.get("_node_ids") or [])],
         source_row=row,
     )
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
@@ -19,6 +19,7 @@ class BSRRecord:
     seller: str = ""
     rating: float | None = None
     rating_count: int | None = None
+    node_ids: list[str] = field(default_factory=list)
     source_row: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
