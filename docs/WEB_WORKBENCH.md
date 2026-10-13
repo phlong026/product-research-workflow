@@ -1,0 +1,64 @@
+# Web 研究工作台(T4-1 / T4-2 / T4-3)
+
+研究员用浏览器完成:建项目 → 上传/取数 → 三个人工检查点 → 分析 → 下载资料包。多人使用,项目彼此隔离。
+
+## 启动
+
+```bash
+uv pip install -e '.[dev,workflow,data,xlsx]' -p .venv
+.venv/bin/python -m research_workflow.web create-user --username alice --role admin   # 口令交互输入(≥12 字符)
+.venv/bin/python -m research_workflow.web serve --port 8800 --insecure-cookies        # 本机 http 调试
+```
+
+- 默认只监听 127.0.0.1;对外提供服务必须放在 **HTTPS 反向代理**之后(Cookie 带 `Secure`)。
+- 数据位置:`runtime/research.db`(引擎)、`runtime/projects/`(项目工件)、`runtime/web.db`(账号/会话/作业)。可用 `RESEARCH_DB_PATH` / `RESEARCH_PROJECTS_ROOT` / `RESEARCH_WEB_DB_PATH` 覆盖。
+- 作业在**子进程**中调用引擎 CLI(`python -m research_workflow.cli`),因此引擎的人工检查点、哈希绑定、审批失效规则与命令行完全一致,Web 不会绕过它们。
+
+## 安全模型(上线前须经人工安全评审)
+
+- 口令 PBKDF2-HMAC-SHA256(60 万次迭代,随机盐);库中只存会话令牌的 SHA-256 摘要。
+- 会话 Cookie `HttpOnly; SameSite=Strict; Secure`;所有写请求需 `X-CSRF-Token`(登录/`GET /api/me` 返回)。
+- 登录连续失败 5 次锁定该用户名 60 秒(进程内;多实例需换共享存储)。
+- 项目访问:owner / editor / viewer;无权访问一律 404;admin 可访问全部。
+- 用户输入只会成为子进程 argv 的单个元素(`--flag=value`),不经 shell;参数全部经 pydantic 校验;工件下载为白名单。
+- 上传仅 csv/xlsx/json,默认上限 50 MB,文件名被清洗,按内容哈希落盘。
+- **已知限制**:无邮件找回/改口令界面(管理员用 CLI 重建);限流为进程内;未做审计日志表;未做 HTTPS 终止(交给反向代理)。
+
+## API(JSON;除登录外均需会话 Cookie,写请求需 CSRF 头)
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/auth/login` `{username,password}` | 设置会话 Cookie,返回 `{username,role,csrf_token}`;失败 401,锁定 429 |
+| POST | `/api/auth/logout` | 注销 |
+| GET | `/api/me` | `{username,role,csrf_token}` |
+| POST | `/api/admin/users` `{username,password(≥12),role}` | 仅 admin |
+| POST | `/api/projects` `{product,marketplace(2 字母),primary_keyword?}` | 创建,返回 `{project_id}`(201) |
+| GET | `/api/projects` | 我可见的项目 `[ {project_id,product,marketplace,status,role,created_at} ]` |
+| GET | `/api/projects/{id}` | 引擎现场:`state/steps`、`pending_checkpoint{checkpoint_id,step_key,prompt,payload}`、`artifacts[]`、`next`(ingest/classify/analyze/dossier/resolve/done)、`role` |
+| POST | `/api/projects/{id}/members` `{username,role: editor\|viewer}` | owner 分享 |
+| PUT | `/api/projects/{id}/uploads?filename=x.csv` | 请求体=文件原始字节;返回 `{upload_id,filename,sha256,size}`(editor+) |
+| POST | `/api/projects/{id}/jobs` `{command,params}` | 提交作业,202 `{job_id}`;项目已有进行中作业 409;参数非法 422 |
+| GET | `/api/projects/{id}/jobs` | 作业列表(新→旧) |
+| GET | `/api/jobs/{job_id}` | `{status: queued\|running\|succeeded\|failed, result, error, attempts, ...}` |
+| POST | `/api/jobs/{job_id}/retry` | 仅 failed 可重试,202 新 `job_id` |
+| GET | `/api/projects/{id}/artifacts/{name}` | 白名单 JSON 工件(如 `classification.json`、`quality.json`、`coverage.json`、`nodes.json`、`route_plan.json`) |
+| GET | `/api/projects/{id}/dossiers` | 已生成资料包版本 |
+| GET | `/api/projects/{id}/dossiers/{vN}/download.zip` | 下载资料包(含 report.md、research_workbook.xlsx、manifest.json 等) |
+
+### 作业命令与参数
+
+| command | params |
+|---|---|
+| `discover-nodes` | `{keyword?, month?}` → 节点候选,**主节点必须人工确认** |
+| `ingest` | 文件模式 `{uploads:[upload_id...], month?, top_n?}`;取数模式 `{live:true, keyword, months:"auto"或"2025-01,2026-01", nodes?:[nodeIdPath...], candidate_n?, top_n?}` → 进入 `data_review` 检查点 |
+| `classify` | `{labels:{key:名称}, rules?:{key:"词1,词2"}, dimension?, provider?: rules\|llm, enrich?: bool}` → `classification_review` 检查点;`needs_review` 行必须在 resolve 时用 `edits` 指定 |
+| `analyze` | `{new_products_upload?, sales_threshold?, consecutive_months?, early_window?, promotion_threshold?, retention_threshold?, study_month?, pairs?, periods?}` → `research_route_review` 检查点 |
+| `resolve` | `{checkpoint_id, approve: bool, edits?:{ASIN:标签}, select?:[route_id...]}` —— **只能由用户明确点击触发,前端不得自动批准** |
+| `dossier` | `{}` → 服务端选择新版本目录 |
+
+## 前端要求(红线)
+
+1. 三个人工检查点(`data_review` / `classification_review` / `research_route_review`)必须展示给用户并等待其明确点击;不得自动 `approve`。
+2. 不显示、不生成任何商业 Yes/No 结论;资料包的人工决策栏由用户自己填写。
+3. 缺月、待人工分类、补齐冲突、口径假设必须原样、醒目地展示(不得隐藏警告)。
+4. CSP 为 `default-src 'self'`:只能用独立的 `/static/*.js`、`/static/*.css`,不能内联脚本,不能引用 CDN。
