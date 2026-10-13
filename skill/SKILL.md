@@ -61,6 +61,7 @@ $PY $ENGINE/scripts/run_research.py nodes-confirm --project <ID> --node <主节�
 $PY $ENGINE/scripts/run_research.py ingest --project <ID> --live --months ... [--node <节点>...]
 
 # 商品补齐（表2：卖点、卖家所属地）；离线用人工明细表，亦用于上传修改后的表2
+# 补齐后会生成检查点 enrichment_review，必须人工 resolve --approve 后才能 classify/analyze/dossier
 $PY $ENGINE/scripts/run_research.py enrich --project <ID> (--live | --details-file <明细表>)
 
 $PY $ENGINE/scripts/run_research.py classify --project <ID> \
@@ -99,6 +100,7 @@ $PY $ENGINE/scripts/run_research.py projects
 | 检查点 | 向用户展示 | 用户答复 → 动作 |
 |---|---|---|
 | data_review | 每月 输入/输出行数、两级去重删除数、质量警告数 | "确认"→`--approve`;提出问题→`--reject`,按用户修正后重新 ingest |
+| enrichment_review | 补齐覆盖率、缺失商品、无卖点商品（来自 enrich 输出和 status 的检查点载荷）；可 `table-export --table 2` 导出表2 修改 | "确认"→`--approve`;要改→修改后 `enrich --details-file` 重新上传（旧确认作废）;驳回→`--reject` 后重新 enrich |
 | classification_review | 各标签数量 + 从 `<项目目录>/classification.json` 读取每个 ASIN 的标签/置信度/理由 | "确认"→`--approve`;改分类→`--approve --edit ASIN=标签` |
 | research_route_review | 每条建议的标题/理由/优先级(来自 analyze 输出) | 多选→`--approve --select id1,id2`(也允许不选任何支线直接 `--approve`) |
 

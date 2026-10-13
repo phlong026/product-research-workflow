@@ -110,6 +110,8 @@ def test_enrich_fills_bullets_and_seller_region_and_feeds_llm_classification(cli
     details = _w(cli.tmp, "details.csv", DETAILS)
     out = cli("enrich", "--project", pid, "--details-file", details)
     assert out["coverage"]["with_bullets"] == 2 and out["coverage"]["seller_region_filled_asins"] == 1
+    assert out["checkpoint_step"] == "enrichment_review"
+    cli("resolve", "--project", pid, "--checkpoint", out["checkpoint_id"], "--approve")
 
     fake = _client(['[{"asin":"N1","label":"nugget","confidence":"high","rationale":"x"},'
                     '{"asin":"B1","label":"bullet","confidence":"high","rationale":"y"}]'])
@@ -152,7 +154,8 @@ def test_llm_requires_bullet_coverage(cli, monkeypatch):
     import scripts.run_research as rr
 
     pid = _ingested(cli)
-    cli("enrich", "--project", pid, "--details-file", _w(cli.tmp, "d.csv", "ASIN,标题\nN1,Nugget Maker\nB1,Bullet Maker\n"))
+    out = cli("enrich", "--project", pid, "--details-file", _w(cli.tmp, "d.csv", "ASIN,标题\nN1,Nugget Maker\nB1,Bullet Maker\n"))
+    cli("resolve", "--project", pid, "--checkpoint", out["checkpoint_id"], "--approve")
     monkeypatch.setattr(rr, "_build_llm_provider", lambda args: AnthropicClassificationProvider(client=_client([])))
     assert "卖点覆盖率" in cli.fail("classify", "--project", pid, "--label", "nugget=咀嚼冰", "--provider", "llm")
 
@@ -193,7 +196,68 @@ def test_cli_fails_loudly_when_every_llm_batch_fails(cli, monkeypatch):
             raise TimeoutError("down")
 
     pid = _ingested(cli)
-    cli("enrich", "--project", pid, "--details-file", _w(cli.tmp, "details.csv", DETAILS))
+    out = cli("enrich", "--project", pid, "--details-file", _w(cli.tmp, "details.csv", DETAILS))
+    cli("resolve", "--project", pid, "--checkpoint", out["checkpoint_id"], "--approve")
     monkeypatch.setattr(rr, "_build_llm_provider", lambda args: AnthropicClassificationProvider(
         client=SimpleNamespace(messages=Dead()), retry_delay_seconds=0))
     assert "全部失败" in cli.fail("classify", "--project", pid, "--label", "nugget=咀嚼冰", "--provider", "llm")
+
+
+# --- 补齐检查点（表2 人工确认关口）---
+
+def test_enrichment_review_gates_classification_until_approved(cli):
+    pid = _ingested(cli)
+    out = cli("enrich", "--project", pid, "--details-file", _w(cli.tmp, "details.csv", DETAILS))
+    assert out["checkpoint_step"] == "enrichment_review"
+    status = cli("status", "--project", pid)
+    assert status["pending_checkpoint"]["step_key"] == "enrichment_review"
+    assert status["pending_checkpoint"]["payload"]["coverage"]["with_bullets"] == 2
+    # 未确认：不能分类
+    assert "enrichment_review" in cli.fail("classify", "--project", pid, "--label", "nugget=咀嚼冰", "--rule", "nugget=nugget")
+    # 驳回后下一步是重新补齐，仍不能分类
+    out2 = cli("resolve", "--project", pid, "--checkpoint", out["checkpoint_id"], "--reject")
+    assert out2["next"] == "enrich"
+    assert cli("status", "--project", pid)["next"] == "enrich"
+    assert "enrichment_review" in cli.fail("classify", "--project", pid, "--label", "nugget=咀嚼冰")
+    # 重新上传表2 → 新检查点 → 确认后才能分类
+    fixed = DETAILS.replace("bullet shaped ice", "bullet shaped ice cubes")
+    out3 = cli("enrich", "--project", pid, "--details-file", _w(cli.tmp, "fixed.csv", fixed))
+    assert out3["checkpoint_id"] != out["checkpoint_id"]
+    assert cli("resolve", "--project", pid, "--checkpoint", out3["checkpoint_id"], "--approve")["next"] == "classify"
+    cls = cli("classify", "--project", pid, "--label", "nugget=咀嚼冰", "--rule", "nugget=nugget")
+    assert cls["enrichment"] == "completed"
+
+
+def test_editing_profiles_after_approval_invalidates_downstream(cli):
+    pid = _ingested(cli)
+    out = cli("enrich", "--project", pid, "--details-file", _w(cli.tmp, "details.csv", DETAILS))
+    cli("resolve", "--project", pid, "--checkpoint", out["checkpoint_id"], "--approve")
+    cls = cli("classify", "--project", pid, "--label", "nugget=咀嚼冰", "--rule", "nugget=nugget")
+    cli("resolve", "--project", pid, "--checkpoint", cls["checkpoint_id"], "--approve")
+    # 人工又上传了修改后的表2：已确认的补齐与分类全部失效，必须重新走
+    cli("enrich", "--project", pid, "--details-file", _w(cli.tmp, "v2.csv", DETAILS.replace("CN(HK)", "CN")))
+    pdir = cli.tmp / "projects" / pid
+    assert not (pdir / "classification.json").exists()
+    assert "enrichment_review" in cli.fail("analyze", "--project", pid)
+    assert "enrichment_review" in cli.fail("new-products-select", "--project", pid, "--output", str(cli.tmp / "np.csv"))
+
+
+def test_skipping_enrichment_still_works_without_the_extra_gate(cli):
+    pid = _ingested(cli)
+    out = cli("classify", "--project", pid, "--label", "nugget=咀嚼冰", "--rule", "nugget=nugget")
+    assert out["enrichment"] == "skipped"
+
+
+def test_full_flow_with_enrichment_review_reaches_dossier(cli):
+    pid = _ingested(cli)
+    out = cli("enrich", "--project", pid, "--details-file", _w(cli.tmp, "details.csv", DETAILS))
+    cli("resolve", "--project", pid, "--checkpoint", out["checkpoint_id"], "--approve")
+    cls = cli("classify", "--project", pid, "--label", "nugget=咀嚼冰", "--label", "bullet=子弹冰", "--rule", "nugget=nugget")
+    cli("resolve", "--project", pid, "--checkpoint", cls["checkpoint_id"], "--approve", "--edit", "B1=bullet")
+    ana = cli("analyze", "--project", pid)
+    cli("resolve", "--project", pid, "--checkpoint", ana["checkpoint_id"], "--approve", "--select", "")
+    result = cli("dossier", "--project", pid, "--output", str(cli.tmp / "out"))
+    assert "evidence/profiles.json" in result["files"] and "workbook.xlsx" in result["files"]
+    approvals = json.loads((cli.tmp / "out" / "evidence" / "approvals.json").read_text(encoding="utf-8"))
+    assert {"data_review", "enrichment_review", "classification_review", "research_route_review"} <= set(approvals)
+    assert approvals["enrichment_review"]["status"] == "approved"

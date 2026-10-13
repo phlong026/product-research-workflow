@@ -258,7 +258,7 @@ def _parse_kv(items: list[str], what: str) -> dict[str, str]:
     return parsed
 
 
-STAGES = ["collect_bsr", "data_review", "enrich_asins", "classify", "classification_review",
+STAGES = ["collect_bsr", "data_review", "enrich_asins", "enrichment_review", "classify", "classification_review",
           "apply_classification_review", "market_metrics", "market_analysis", "competition_metrics",
           "new_product_analysis", "research_route", "route_review", "research_route_review",
           "apply_route_review", "dossier"]
@@ -288,6 +288,14 @@ def _require_approved(svc: WorkflowService, pid: str, pdir: Path, steps: list[st
         if cp is None or cp.status.value != "approved" or step not in state.get("completed_steps", []):
             raise ValueError(f"{step} 尚未人工确认;请先检查 status 并 resolve 当前检查点")
         _verify_hashes(pdir, (cp.response or {}).get("artifact_hashes", {}))
+
+
+def _gate_steps(pdir: Path, steps: list[str]) -> list[str]:
+    """已做商品补齐（存在 profiles.json）时，下游必须先通过“补齐检查点”（表2 人工确认）。"""
+    if (pdir / "profiles.json").exists() and "enrichment_review" not in steps:
+        index = steps.index("data_review") + 1 if "data_review" in steps else 0
+        return [*steps[:index], "enrichment_review", *steps[index:]]
+    return steps
 
 
 def _invalidate(svc: WorkflowService, pid: str, pdir: Path, start: str) -> None:
@@ -675,9 +683,15 @@ def cmd_enrich(args: argparse.Namespace) -> None:
         "profiles": {asin: p.to_dict() for asin, p in sorted(profiles.items())},
     })
     svc.set_step(args.project, "enrich_asins", StepStatus.COMPLETED, output_ref="profiles.json")
+    checkpoint = svc.request_human_checkpoint(
+        args.project, "enrichment_review",
+        "请检查商品补齐结果（表2：卖点、卖家所属地等）：覆盖率、缺失商品、卖点是否可信。可用 table-export --table 2 导出修改后用 enrich --details-file 重新上传，确认后进入分类。",
+        {"coverage": coverage, "source": source, "missing_asins": missing[:200],
+         "without_bullets": sorted(a for a, p in profiles.items() if not p.bullets)[:200],
+         "artifact_hashes": _hashes(pdir, ["profiles.json"])})
     _emit({"project_id": args.project, "enrichment": "completed", "coverage": coverage,
-           "missing_asins": missing[:50],
-           "next": "classify（默认使用补齐后的卖点；缺失商品不会被当作已补齐）"})
+           "missing_asins": missing[:50], "checkpoint_id": checkpoint.id, "checkpoint_step": "enrichment_review",
+           "next": "resolve --approve 后进入 classify（缺失商品不会被当作已补齐）；改表2 请 table-export --table 2 后 enrich --details-file 重新上传"})
 
 
 def cmd_classify(args: argparse.Namespace) -> None:
@@ -685,7 +699,7 @@ def cmd_classify(args: argparse.Namespace) -> None:
     if svc.store.get_project(args.project) is None:
         raise KeyError(f"Unknown project: {args.project}")
     pdir = _project_dir(args, args.project)
-    _require_approved(svc, args.project, pdir, ["data_review"])
+    _require_approved(svc, args.project, pdir, _gate_steps(pdir, ["data_review"]))
     records = _load_records(pdir)
 
     enriched = _valid_profiles(pdir)
@@ -794,6 +808,8 @@ def cmd_status(args: argparse.Namespace) -> None:
         next_action = "resolve"
     elif "data_review" not in completed:
         next_action = "ingest"
+    elif (pdir / "profiles.json").exists() and "enrichment_review" not in completed:
+        next_action = "enrich"  # 补齐结果尚未人工确认（被驳回或被取代）：重新补齐/上传表2
     elif "classification_review" not in completed:
         next_action = "classify"
     elif "research_route_review" not in completed:
@@ -875,12 +891,13 @@ def cmd_resolve(args: argparse.Namespace) -> None:
 
     next_action = {
         "data_review": "classify",
+        "enrichment_review": "classify",
         "classification_review": "analyze",
         "route_review": "dossier",
         "research_route_review": "dossier",
     }.get(checkpoint.step_key, "status")
     if not args.approve:
-        next_action = {"data_review": "ingest", "classification_review": "classify"}.get(checkpoint.step_key, "analyze")
+        next_action = {"data_review": "ingest", "enrichment_review": "enrich", "classification_review": "classify"}.get(checkpoint.step_key, "analyze")
     _emit(
         {
             "project_id": args.project,
@@ -1132,7 +1149,7 @@ def cmd_new_products_select(args: argparse.Namespace) -> None:
     if svc.store.get_project(args.project) is None:
         raise KeyError(f"Unknown project: {args.project}")
     pdir = _project_dir(args, args.project)
-    _require_approved(svc, args.project, pdir, ["data_review"])
+    _require_approved(svc, args.project, pdir, _gate_steps(pdir, ["data_review"]))
     records = _load_records(pdir)
     profiles = _valid_profiles(pdir) or {}
     for r in records:  # 补齐画像里的上架时间只填空缺
@@ -1192,7 +1209,7 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     if svc.store.get_project(args.project) is None:
         raise KeyError(f"Unknown project: {args.project}")
     pdir = _project_dir(args, args.project)
-    _require_approved(svc, args.project, pdir, ["data_review", "classification_review"])
+    _require_approved(svc, args.project, pdir, _gate_steps(pdir, ["data_review", "classification_review"]))
     envelope = _require_file(
         pdir / "classification.json", "缺少 classification.json;先运行 classify 并通过人工确认"
     )
@@ -1335,7 +1352,7 @@ def cmd_dossier(args: argparse.Namespace) -> None:
     if project is None:
         raise KeyError(f"Unknown project: {args.project}")
     pdir = _project_dir(args, args.project)
-    _require_approved(svc, args.project, pdir, ["data_review", "classification_review", "research_route_review"])
+    _require_approved(svc, args.project, pdir, _gate_steps(pdir, ["data_review", "classification_review", "research_route_review"]))
     plan_data = _require_file(pdir / "route_plan.json", "缺少 route_plan.json;先运行 analyze")
     if not plan_data.get("human_confirmed"):
         raise ValueError("研究路线尚未人工确认;先 resolve route_review 检查点")
