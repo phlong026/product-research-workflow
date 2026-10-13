@@ -132,6 +132,19 @@ def parse_date(value: Any) -> date | None:
     return None
 
 
+AMAZON_FOUNDED = date(1995, 1, 1)
+
+
+def valid_listing_date(value: Any, as_of: date | None = None) -> date | None:
+    """A listing date is valid if it parses, is not before Amazon existed, and is not in the future."""
+    parsed = parse_date(value)
+    if parsed is None or parsed < AMAZON_FOUNDED:
+        return None
+    if as_of is not None and parsed > as_of:
+        return None
+    return parsed
+
+
 def read_rows(path: str | Path) -> list[dict[str, Any]]:
     """Read records from CSV (header row) or JSON (list, or {"records": [...]})."""
     file = Path(path)
