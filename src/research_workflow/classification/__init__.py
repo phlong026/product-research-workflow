@@ -1,3 +1,5 @@
+from .evaluation import NEEDS_REVIEW, EvalReport, evaluate
+from .llm_provider import LLMClassificationProvider
 from .models import (
     ClassificationBatch,
     ClassificationLabel,
@@ -19,7 +21,11 @@ __all__ = [
     "ClassificationProvider",
     "ClassificationSchema",
     "ClassificationService",
+    "EvalReport",
+    "LLMClassificationProvider",
+    "NEEDS_REVIEW",
     "ProductClassification",
     "RuleClassificationProvider",
     "build_classification_prompt",
+    "evaluate",
 ]
