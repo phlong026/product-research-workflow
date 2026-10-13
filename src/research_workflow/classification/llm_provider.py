@@ -18,14 +18,17 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 import json
+import logging
 import re
 from typing import Any
 
-from research_workflow.connectors.base import with_retries
+from research_workflow.connectors.base import safe_exception_summary, with_retries
 from research_workflow.enrichment.models import ASINProfile
 
 from .models import ClassificationSchema
 from .prompt import build_classification_prompt
+
+logger = logging.getLogger(__name__)
 
 _CONFIDENCE_LEVELS = {"low": 0, "medium": 1, "high": 2}
 _ALLOWED_KEYS = {"asin", "label", "confidence", "evidence", "ambiguous"}
@@ -85,8 +88,14 @@ class LLMClassificationProvider:
                     lambda c=chunk: self._request(schema, c),
                     attempts=self.attempts,
                     base_delay_seconds=self.base_delay_seconds,
+                    operation=f"llm classify ({self.name})",
                 )
             except Exception as exc:  # noqa: BLE001 - surfaced as per-row review reason
+                # 只记块大小与脱敏后的异常摘要;不记 prompt / 商品标题要点全文
+                logger.warning(
+                    "llm classification chunk failed provider=%s chunk_start=%d chunk_size=%d: %s",
+                    self.name, start, len(chunk), safe_exception_summary(exc),
+                )
                 rows.extend(
                     _review_row(p.asin, f"llm call failed after {self.attempts} attempts: {exc}")
                     for p in chunk

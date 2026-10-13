@@ -49,3 +49,16 @@ class MonthlyFetchResult:
     raw_by_month: dict[str, Any]
     requests: dict[str, dict[str, Any]]  # request scope per requested month
     missing_months: dict[str, str] = field(default_factory=dict)  # month -> reason
+
+    def connector_error_months(self) -> list[str]:
+        """接口失败的月份(``connector_error:`` 前缀),按请求顺序。"""
+        return self._months_with_prefix("connector_error")
+
+    def empty_months(self) -> list[str]:
+        """接口成功但确实无数据的月份(``empty_response:`` 前缀),按请求顺序。"""
+        return self._months_with_prefix("empty_response")
+
+    def _months_with_prefix(self, prefix: str) -> list[str]:
+        return [
+            m for m in self.months if self.missing_months.get(m, "").startswith(f"{prefix}:")
+        ]
