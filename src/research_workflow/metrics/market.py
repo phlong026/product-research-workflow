@@ -10,10 +10,17 @@ from research_workflow.data.models import BSRRecord
 from .models import (
     MarketMetricsResult,
     MonthlyMarketMetric,
+    RegionSegmentMonthlyMetric,
     SegmentChangeDecomposition,
     SegmentMonthlyMetric,
     SellerRegionMonthlyMetric,
     PeriodComparisonMetric,
+)
+from .seasonality import detect_seasonality
+
+UNKNOWN_REGION = "UNKNOWN"
+CAUSE_HYPOTHESIS_REGION_COVERAGE = (
+    "待验证假设:基期月份缺失,无法区分季节波动与覆盖变化;未经验证,不构成原因结论"
 )
 
 
@@ -76,12 +83,14 @@ def build_market_metrics(
     segment_asins: dict[tuple[str, str], set[str]] = defaultdict(set)
     region_sales: dict[tuple[str, str], int] = defaultdict(int)
     region_asins: dict[tuple[str, str], set[str]] = defaultdict(set)
+    cell_sales: dict[tuple[str, str, str], int] = defaultdict(int)
+    cell_asins: dict[tuple[str, str, str], set[str]] = defaultdict(set)
 
     for row in rows:
         month = f"{_month_key(row.month)[0]:04d}-{_month_key(row.month)[1]:02d}"
         asin = row.asin.upper()
         segment = _classification_label(classifications.get(asin))
-        region = row.seller_region or "UNKNOWN"
+        region = row.seller_region or UNKNOWN_REGION
         sales = max(0, int(row.monthly_sales))
 
         market_sales[month] += sales
@@ -90,6 +99,8 @@ def build_market_metrics(
         segment_asins[(month, segment)].add(asin)
         region_sales[(month, region)] += sales
         region_asins[(month, region)].add(asin)
+        cell_sales[(month, region, segment)] += sales
+        cell_asins[(month, region, segment)].add(asin)
 
     months = sorted(market_sales, key=_month_key)
     market_metrics: list[MonthlyMarketMetric] = []
@@ -145,21 +156,78 @@ def build_market_metrics(
 
     region_metrics: list[SellerRegionMonthlyMetric] = []
     regions = sorted({region for _, region in region_sales})
+    first_month, last_month = (months[0], months[-1]) if months else ("", "")
     for month in months:
         for region in regions:
             key = (month, region)
             sales = region_sales.get(key, 0)
             count = len(region_asins.get(key, set()))
+            share = _share(sales, market_sales[month])
+            warnings: list[str] = []
+
+            prev_month = _previous_month(month)
+            sales_mom = share_mom = None
+            if prev_month in market_sales:
+                prev_sales = region_sales.get((prev_month, region), 0)
+                sales_mom = _pct_change(sales, prev_sales)
+                share_mom = share - _share(prev_sales, market_sales[prev_month])
+            elif _month_key(first_month) < _month_key(prev_month) < _month_key(last_month):
+                # A gap inside the observed range; the series start is not a gap.
+                warnings.append(f"mom_base_month_missing:{prev_month}")
+
+            prev_year = _previous_year(month)
+            sales_yoy = share_yoy = None
+            if prev_year in market_sales:
+                prev_sales = region_sales.get((prev_year, region), 0)
+                sales_yoy = _pct_change(sales, prev_sales)
+                share_yoy = share - _share(prev_sales, market_sales[prev_year])
+            else:
+                # No YoY conclusion without the base month: flag coverage instead.
+                warnings.append(f"yoy_base_month_missing:{prev_year}")
+
             region_metrics.append(
                 SellerRegionMonthlyMetric(
                     month=month,
                     seller_region=region,
                     sales=sales,
                     asin_count=count,
-                    sales_share_pct=_share(sales, market_sales[month]),
+                    sales_share_pct=share,
                     asin_share_pct=_share(count, len(market_asins[month])),
+                    sales_mom_pct=sales_mom,
+                    sales_yoy_pct=sales_yoy,
+                    share_mom_pp=share_mom,
+                    share_yoy_pp=share_yoy,
+                    coverage_warning=";".join(warnings) or None,
+                    cause_hypothesis=(
+                        CAUSE_HYPOTHESIS_REGION_COVERAGE if any(w.startswith("yoy") for w in warnings) else None
+                    ),
                 )
             )
+
+    region_segment_metrics: list[RegionSegmentMonthlyMetric] = []
+    for month in months:
+        known_total = sum(v for (m, r), v in region_sales.items() if m == month and r != UNKNOWN_REGION)
+        for region in regions:
+            region_total = region_sales.get((month, region), 0)
+            for segment in segments:
+                key = (month, region, segment)
+                sales = cell_sales.get(key, 0)
+                count = len(cell_asins.get(key, set()))
+                region_segment_metrics.append(
+                    RegionSegmentMonthlyMetric(
+                        month=month,
+                        seller_region=region,
+                        segment=segment,
+                        sales=sales,
+                        asin_count=count,
+                        sales_share_of_month_pct=_share(sales, market_sales[month]),
+                        sales_share_of_known_region_pct=(
+                            None if region == UNKNOWN_REGION else _share(sales, known_total)
+                        ),
+                        share_within_region_pct=_share(sales, region_total),
+                        asin_share_of_month_pct=_share(count, len(market_asins[month])),
+                    )
+                )
 
     pairs = list(decomposition_pairs or _default_decomposition_pairs(months))
     decompositions: list[SegmentChangeDecomposition] = []
@@ -237,6 +305,8 @@ def build_market_metrics(
         seller_regions=region_metrics,
         decompositions=decompositions,
         period_comparisons=period_comparisons,
+        region_segments=region_segment_metrics,
+        seasonality=detect_seasonality(market_sales),
     )
 
 
