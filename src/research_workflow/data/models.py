@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
@@ -60,9 +60,24 @@ class DataQualityReport:
         )
 
 
+@dataclass(slots=True, frozen=True)
+class DedupeAuditEntry:
+    """一条去重审计:removed_asin 因 rule 被折叠进 kept_asin。"""
+
+    month: str
+    rule: str
+    kept_asin: str
+    removed_asin: str
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 @dataclass(slots=True)
 class MonthlyBSRResult:
     month: str
     records: list[BSRRecord]
     stats: PipelineStats
     quality: DataQualityReport | None = None
+    dedupe_audit: list[DedupeAuditEntry] = field(default_factory=list)
