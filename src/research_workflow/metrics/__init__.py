@@ -1,4 +1,5 @@
 from .golden_case import MetricCheck, compare_metrics
+from .iteration import IterationConfig, IterationResult, SegmentIteration, build_iteration_comparison
 from .market import build_market_metrics
 from .seasonality import detect_seasonality
 from .models import (
@@ -14,6 +15,10 @@ from .models import (
 )
 
 __all__ = [
+    "IterationConfig",
+    "IterationResult",
+    "SegmentIteration",
+    "build_iteration_comparison",
     "MarketMetricsResult",
     "MetricCheck",
     "MonthlyMarketMetric",
