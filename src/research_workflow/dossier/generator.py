@@ -173,6 +173,39 @@ class ResearchDossierGenerator:
             writer.writeheader()
             writer.writerows({key: _csv_cell(value) for key, value in row.items()} for row in dict_rows)
 
+    @staticmethod
+    def _external_evidence_lines(dossier: ResearchDossierInput) -> list[str]:
+        ext = dossier.external_evidence
+        if not ext:
+            return ["未录入外部证据：市场规模与增速、TikTok 综合、竞争深研均未覆盖。"]
+        lines: list[str] = []
+        share = ext.get("sample_share") or {}
+        if share.get("share_pct") is not None:
+            lines.append(
+                f"- Top 样本销量约占美国市场（{share['period']} 年，外部证据 `{share['evidence_id']}`）"
+                f" {share['share_pct']:.2f}%；样本销量本身不等于美国整体市场规模。"
+            )
+        else:
+            lines.append(f"- Top 样本占美国市场比例：未知（{share.get('reason', '缺少外部市场规模证据')}）。"
+                         "样本销量不得当作美国整体市场规模。")
+        lines.extend(["", "### 证据覆盖", "", "| 模块 | 证据槽位 | 状态 | 条数 | 来源提示 |", "|---|---|---|---:|---|"])
+        for row in ext.get("coverage", []):
+            status = "已覆盖" if row["status"] == "covered" else "**未覆盖**"
+            lines.append(f"| {row['module']} | {row['title']} | {status} | {row['evidence_count']} | {row['provider_hint']} |")
+        findings = ext.get("findings", [])
+        if findings:
+            lines.extend(["", "### 深挖结论（每条均引用证据）", ""])
+            for f in findings:
+                lines.append(f"- [{f['module']}] {f['text']}（证据：`{', '.join(f['evidence_ids'])}`）")
+        evidence = ext.get("evidence", [])
+        if evidence:
+            lines.extend(["", "### 证据明细", "", "| ID | 槽位 | 内容 | 数值 | 周期 | 来源 | 可信度 |", "|---|---|---|---|---|---|---|"])
+            for e in evidence:
+                value = "" if e["value"] is None else f"{e['value']} {e['unit'] or ''}".strip()
+                source = e["source_url"] or f"文件 sha256:{(e['source_sha256'] or '')[:12]}"
+                lines.append(f"| `{e['evidence_id']}` | {e['slot']} | {e['claim']} | {value} | {e['period'] or ''} | {e['source_name']} {source} | {e['confidence']} |")
+        return lines
+
     def _markdown(self, dossier: ResearchDossierInput) -> str:
         market = sorted(dossier.market_metrics.market, key=lambda row: row.month)
         latest = market[-1] if market else None
@@ -339,7 +372,10 @@ class ResearchDossierGenerator:
         else:
             lines.append("未生成后续研究路线。")
 
-        lines.extend(["", "## 7. 原始资料索引", ""])
+        lines.extend(["", "## 7. 外部证据与深挖结论", ""])
+        lines.extend(self._external_evidence_lines(dossier))
+
+        lines.extend(["", "## 8. 原始资料索引", ""])
         if dossier.source_artifacts:
             lines.extend(
                 [

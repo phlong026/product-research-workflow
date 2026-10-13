@@ -75,6 +75,11 @@ def build_workbook_sheets(
              "人工确认": "是" if s.route_id in dossier.route_plan.confirmed_route_ids else "否"}
             for s in dossier.route_plan.suggestions
         ]
+    if dossier.external_evidence:
+        ext = dossier.external_evidence
+        sheets["证据覆盖"] = [dict(r) for r in ext.get("coverage", [])]
+        sheets["外部证据"] = [dict(r) for r in ext.get("evidence", [])]
+        sheets["深挖结论"] = [dict(r) for r in ext.get("findings", [])]
     sheets["数据质量"] = [dict(row) for row in dossier.data_quality]
     return {name: rows for name, rows in sheets.items() if rows or name in {"说明", "表1_清洗Top"}}
 

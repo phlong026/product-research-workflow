@@ -51,6 +51,8 @@ from research_workflow.enrichment.service import (
 from research_workflow.competition import build_competition_metrics
 from research_workflow.competition.models import CompetitionMetricsResult
 from research_workflow.data import MonthlyBSRConfig, build_monthly_top
+from research_workflow.evidence import EvidenceLedger, sample_share_of_market
+from research_workflow.router.service import confirmed_modules
 from research_workflow.data.io import read_tabular_rows, write_csv_rows
 from research_workflow.data.xlsx import write_xlsx
 from research_workflow.data.models import DataQualityReport, PipelineStats
@@ -73,7 +75,9 @@ from research_workflow.enrichment.models import ASINProfile
 from research_workflow.mcp import MCPGateway, MCPRegistry
 from research_workflow.metrics import build_market_metrics
 from research_workflow.metrics.models import MarketMetricsResult
-from research_workflow.new_products import NewProductConfig, NewProductSnapshot, analyze_new_products
+from research_workflow.new_products import (
+    NewProductConfig, NewProductSnapshot, analyze_new_products, select_new_products,
+)
 from research_workflow.new_products.models import NewProductAnalysisResult
 from research_workflow.router import ResearchRouter
 from research_workflow.router.models import ResearchRoutePlan
@@ -1041,6 +1045,111 @@ def cmd_table_import(args: argparse.Namespace) -> None:
     _save_json(log_path, log)
 
 
+def _route_modules(pdir: Path) -> list[str]:
+    path = pdir / "route_plan.json"
+    if not path.exists():
+        return []
+    plan = rebuild(ResearchRoutePlan, _load_json(path))
+    return confirmed_modules(plan) if plan.human_confirmed else []
+
+
+def _ledger(pdir: Path) -> EvidenceLedger:
+    return EvidenceLedger(pdir / "evidence_ledger.json")
+
+
+def cmd_evidence_add(args: argparse.Namespace) -> None:
+    """登记一条外部研究证据（行业研报、Google Trends、TikTok 台数、专利、CPC…）。必须有可追溯来源。"""
+    svc = _service(args)
+    if svc.store.get_project(args.project) is None:
+        raise KeyError(f"Unknown project: {args.project}")
+    pdir = _project_dir(args, args.project)
+    source_file = source_sha = None
+    if args.source_file:
+        snapshot = _snapshot_source(pdir, Path(args.source_file))
+        source_file, source_sha = snapshot.relative_to(pdir).as_posix(), _sha256_file(snapshot)
+    ledger = _ledger(pdir)
+    record = ledger.add_evidence(
+        slot=args.slot, claim=args.claim, value=args.value, unit=args.unit, period=args.period,
+        geography=args.geography, scope=args.scope, source_name=args.source_name,
+        source_url=args.source_url, source_file=source_file, source_sha256=source_sha,
+        added_by=args.added_by, confidence=args.confidence)
+    ledger.save()
+    _emit({"project_id": args.project, "evidence": record.to_dict(), "total_evidence": len(ledger.evidence)})
+
+
+def cmd_finding_add(args: argparse.Namespace) -> None:
+    """登记深挖结论；必须引用已入账证据，且不得含 Yes/No/进入建议（人工决策边界）。"""
+    svc = _service(args)
+    if svc.store.get_project(args.project) is None:
+        raise KeyError(f"Unknown project: {args.project}")
+    pdir = _project_dir(args, args.project)
+    ledger = _ledger(pdir)
+    finding = ledger.add_finding(module=args.module, text=args.text, evidence_ids=args.evidence)
+    ledger.save()
+    _emit({"project_id": args.project, "finding": finding.to_dict()})
+
+
+def cmd_evidence_status(args: argparse.Namespace) -> None:
+    svc = _service(args)
+    if svc.store.get_project(args.project) is None:
+        raise KeyError(f"Unknown project: {args.project}")
+    pdir = _project_dir(args, args.project)
+    ledger = _ledger(pdir)
+    coverage = ledger.coverage(_route_modules(pdir))
+    missing = [c.slot for c in coverage if c.status == "missing"]
+    _emit({"project_id": args.project,
+           "coverage": [dataclasses.asdict(c) for c in coverage],
+           "missing_slots": missing, "evidence": len(ledger.evidence), "findings": len(ledger.findings),
+           "note": "缺失的证据槽位会在资料包中显式标为“未覆盖”，不会被当作结论"})
+
+
+def _external_evidence_snapshot(pdir: Path, records: list[BSRRecord]) -> dict[str, Any]:
+    ledger = _ledger(pdir)
+    return {
+        "evidence": [e.to_dict() for e in ledger.evidence],
+        "findings": [{**f.to_dict(), "evidence_ids": list(f.evidence_ids)} for f in ledger.findings],
+        "coverage": [dataclasses.asdict(c) for c in ledger.coverage(_route_modules(pdir))],
+        "sample_share": sample_share_of_market(records, ledger.evidence),
+    }
+
+
+def cmd_new_products_select(args: argparse.Namespace) -> None:
+    """从已确认的月度数据中筛选近 N 天新品（排除老商品新变体），导出待人工复核的新品跟踪表。"""
+    svc = _service(args)
+    if svc.store.get_project(args.project) is None:
+        raise KeyError(f"Unknown project: {args.project}")
+    pdir = _project_dir(args, args.project)
+    _require_approved(svc, args.project, pdir, ["data_review"])
+    records = _load_records(pdir)
+    profiles = _valid_profiles(pdir) or {}
+    for r in records:  # 补齐画像里的上架时间只填空缺
+        if not r.launch_date and profiles.get(r.asin) and profiles[r.asin].launch_date:
+            r.launch_date = profiles[r.asin].launch_date
+        if not r.parent_asin and profiles.get(r.asin):
+            r.parent_asin = profiles[r.asin].parent_asin
+    as_of = args.as_of or max(r.month for r in records)
+    candidates = select_new_products(records, as_of, args.window_days)
+    by_asin = {c.asin: c for c in candidates}
+    labels: dict[str, str] = {}
+    if (pdir / "classification.json").exists():
+        labels = {a: row["label"] for a, row in _load_json(pdir / "classification.json")["batch"]["rows"].items()}
+    rows = [
+        {"ASIN": r.asin, "月份": r.month, "月销量": r.monthly_sales, "上架时间": r.launch_date or "",
+         "卖家所属地": r.seller_region, "账号类型": "UNKNOWN", "细分": labels.get(r.asin, "unknown"),
+         "eligible": "true" if by_asin[r.asin].eligible else "false", "原因": by_asin[r.asin].reason}
+        for r in sorted(records, key=lambda r: (r.asin, r.month)) if by_asin[r.asin].eligible or args.include_excluded
+    ]
+    write_csv_rows(Path(args.output), rows)
+    reasons: dict[str, int] = {}
+    for c in candidates:
+        reasons[c.reason] = reasons.get(c.reason, 0) + 1
+    _emit({"project_id": args.project, "as_of": as_of, "window_days": args.window_days,
+           "eligible_asins": sum(1 for c in candidates if c.eligible), "reasons": reasons,
+           "file": str(Path(args.output).resolve()),
+           "note": "账号类型(VC/SC)与缺失月份需人工/接口补充；某月未出现在 TopN 的新品该月为未知，不是 0",
+           "next": "人工复核后用 analyze --new-products-file 导入"})
+
+
 def cmd_analyze(args: argparse.Namespace) -> None:
     svc = _service(args)
     if svc.store.get_project(args.project) is None:
@@ -1232,6 +1341,9 @@ def cmd_dossier(args: argparse.Namespace) -> None:
         missing_evidence.append("当前采用规则分类，未调用 LLM")
     if context.get("enrichment") != "completed":
         missing_evidence.append("未执行商品补齐（卖点/卖家所属地）")
+    uncovered = [c.title for c in _ledger(pdir).coverage(_route_modules(pdir)) if c.status == "missing"]
+    if uncovered:
+        missing_evidence.append("外部证据未覆盖：" + "、".join(uncovered))
     if (pdir / "table_edits.json").exists():
         missing_evidence.append("表1 含人工修改，差异明细见 evidence/table_edits.json")
     if new_products is None:
@@ -1241,7 +1353,7 @@ def cmd_dossier(args: argparse.Namespace) -> None:
     approvals = svc.store.get_state(args.project).get("approved_checkpoints", {})
     evidence_names = ["records.json", "quality.json", "sources.json", "classification.json", "analysis_context.json",
                       "market_metrics.json", "market_analysis.json", "competition.json", "new_products.json", "route_plan.json",
-                      "profiles.json", "table_edits.json", "nodes.json", "candidates.json"]
+                      "profiles.json", "table_edits.json", "nodes.json", "candidates.json", "evidence_ledger.json"]
     evidence_files = {name: pdir / name for name in evidence_names if (pdir / name).is_file()}
     evidence_files.update({source.sha256 + Path(source.source).suffix: (Path(source.source) if Path(source.source).is_absolute() else pdir / source.source) for source in sources})
     approval_history = {key: dataclasses.asdict(svc.store.get_checkpoint(value)) for key,value in approvals.items()}
@@ -1258,6 +1370,7 @@ def cmd_dossier(args: argparse.Namespace) -> None:
             source_artifacts=[dataclasses.replace(source, source="evidence/" + source.sha256 + Path(source.source).suffix) for source in sources],
             data_quality=data_quality,
             missing_evidence=missing_evidence,
+            external_evidence=_external_evidence_snapshot(pdir, _load_records(pdir)),
             metadata={**context, "approved_checkpoints": svc.store.get_state(args.project).get("approved_checkpoints", {})},
         ),
         output, evidence_files=evidence_files, approval_history=approval_history,
@@ -1361,6 +1474,41 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-bullets-coverage", type=float, default=50.0,
                    help="LLM 分类要求的最低卖点覆盖率(%)")
     p.set_defaults(func=cmd_classify)
+
+    p = sub.add_parser("new-products-select", help="筛选近 N 天新品（排除老商品新变体）并导出新品跟踪表")
+    p.add_argument("--project", required=True)
+    p.add_argument("--as-of", help="截止月份 YYYY-MM；缺省取数据最新月")
+    p.add_argument("--window-days", type=int, default=90)
+    p.add_argument("--include-excluded", action="store_true", help="同时导出被排除的行（带原因）供人工复核")
+    p.add_argument("--output", required=True)
+    p.set_defaults(func=cmd_new_products_select)
+
+    p = sub.add_parser("evidence-add", help="登记外部研究证据（须有来源 URL 或来源文件）")
+    p.add_argument("--project", required=True)
+    p.add_argument("--slot", required=True)
+    p.add_argument("--claim", required=True)
+    p.add_argument("--value")
+    p.add_argument("--unit", help="units(台数)/usd/pct；TikTok 销量槽位只接受台数，GMV 会被拒绝")
+    p.add_argument("--period")
+    p.add_argument("--geography")
+    p.add_argument("--scope")
+    p.add_argument("--source-name", required=True)
+    p.add_argument("--source-url")
+    p.add_argument("--source-file")
+    p.add_argument("--added-by", default="agent")
+    p.add_argument("--confidence", default="medium", choices=["high", "medium", "low"])
+    p.set_defaults(func=cmd_evidence_add)
+
+    p = sub.add_parser("finding-add", help="登记深挖结论（必须引用已入账证据；不得含 Yes/No 决策）")
+    p.add_argument("--project", required=True)
+    p.add_argument("--module", required=True)
+    p.add_argument("--text", required=True)
+    p.add_argument("--evidence", action="append", default=[])
+    p.set_defaults(func=cmd_finding_add)
+
+    p = sub.add_parser("evidence-status", help="查看外部证据覆盖情况（基线模块 + 已确认路线触发的槽位）")
+    p.add_argument("--project", required=True)
+    p.set_defaults(func=cmd_evidence_status)
 
     p = sub.add_parser("table-export", help="导出过程表(1=清洗Top 2=商品补齐 3=分类)供人工检查修改")
     p.add_argument("--project", required=True)
