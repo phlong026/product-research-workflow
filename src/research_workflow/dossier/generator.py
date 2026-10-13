@@ -375,7 +375,8 @@ class ResearchDossierGenerator:
                 [
                     f"- 有效新品：{s.total_products}",
                     f"- 满足项目成功定义：{s.successful_products}",
-                    f"- 成功率：{s.success_rate_pct:.2f}%",
+                    f"- 成功率（下限，仅计已确认）：{s.success_rate_pct:.2f}%；因历史中间缺月无法判定的新品 {s.launch_success_unknown_products} 个，"
+                    f"含未知的上限 {_fmt_pct(s.success_rate_upper_bound_pct)}",
                     f"- 当前仍满足存活阈值：{s.surviving_successful_products}",
                     f"- 已成功新品当期观测覆盖率：{_fmt_pct(s.current_observation_coverage_pct)}；未观测 {s.unknown_successful_products} 个",
                     f"- 已观测成功新品存活率：{_fmt_pct(s.survival_rate_among_successful_pct)}（分母仅含已观测成功新品）",

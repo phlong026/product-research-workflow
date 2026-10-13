@@ -269,6 +269,8 @@ def retention_rows(dossier: ResearchDossierInput) -> list[tuple[str, float | int
     return [
         ("历史成功率", s.success_rate_pct, "pct",
          f"分母=全部有效新品({s.total_products});分子=曾连续{consecutive}个月达标({s.successful_products})"),
+        ("历史成功率(上限,含缺月未知)", s.success_rate_upper_bound_pct, "pct",
+         f"历史中间缺月无法判定的新品 {s.launch_success_unknown_products} 个,按成功计入分子"),
         ("当期存活率", s.survival_rate_among_successful_pct, "pct",
          f"分母=当期已观测的成功新品({s.observed_successful_products});当期未观测 {s.unknown_successful_products} 个不计入"),
         ("原文口径留存率(下限)", s.retention_rate_pct, "pct",
