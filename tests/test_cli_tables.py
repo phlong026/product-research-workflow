@@ -152,8 +152,10 @@ def test_table2_edits_survive_reclassification_and_fill_records(project, tmp_pat
         if row["asin"] == "A2":
             row["seller_region"] = "CN"
             row["bullets"] = "Makes bullet ice fast || Compact"
-    _run(tmp_path, capsys, "import-table", "--project", pid, "--table", "2",
-         "--file", str(_write(tmp_path / "t2-edit.csv", rows)))
+    imported = _run(tmp_path, capsys, "import-table", "--project", pid, "--table", "2",
+                    "--file", str(_write(tmp_path / "t2-edit.csv", rows)))
+    assert imported["checkpoint_step"] == "enrichment_review"  # 表2 修改须经补齐检查点重新确认
+    _approve(tmp_path, capsys, pid, imported["checkpoint_id"])
     # 表2 只让分类失效,表1 审批保持有效
     for _ in range(2):  # 重复分类后人工修改仍在
         res = _run(tmp_path, capsys, "classify", "--project", pid, "--label", "bullet=B",
@@ -163,3 +165,23 @@ def test_table2_edits_survive_reclassification_and_fill_records(project, tmp_pat
     _run(tmp_path, capsys, "analyze", "--project", pid)
     market = (tmp_path / "projects" / pid / "market_metrics.json").read_text(encoding="utf-8")
     assert '"UNKNOWN"' not in market  # A2 的地区已由人工补为 CN
+
+
+def test_table2_upload_without_machine_enrichment_still_requires_review_before_classify(project, tmp_path, capsys) -> None:
+    pid, cp = project
+    _approve(tmp_path, capsys, pid, cp)
+    out = tmp_path / "t2.csv"
+    _run(tmp_path, capsys, "export-table", "--project", pid, "--table", "2", "--output", str(out))
+    rows = _read(out)
+    for row in rows:
+        if row["asin"] == "A2":
+            row["bullets"] = "Makes bullet ice fast"
+    imported = _run(tmp_path, capsys, "import-table", "--project", pid, "--table", "2",
+                    "--file", str(_write(tmp_path / "t2-edit.csv", rows)))
+    assert _run(tmp_path, capsys, "status", "--project", pid)["next"] == "resolve"
+    with pytest.raises(SystemExit):  # 人工表2 未经补齐检查点确认:不能分类
+        _run(tmp_path, capsys, "classify", "--project", pid, "--label", "bullet=B", "--rule", "bullet=fast")
+    _approve(tmp_path, capsys, pid, imported["checkpoint_id"])
+    assert _run(tmp_path, capsys, "status", "--project", pid)["next"] == "classify"
+    res = _run(tmp_path, capsys, "classify", "--project", pid, "--label", "bullet=B", "--rule", "bullet=fast")
+    assert res["label_counts"].get("bullet") == 1

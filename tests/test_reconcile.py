@@ -70,3 +70,15 @@ def test_web_job_whitelist_accepts_reconcile_and_rejects_extra_params(tmp_path):
     assert argv[-1] == f"--output={tmp_path / 'exports' / 'reconcile.csv'}"
     with pytest.raises(jobs.JobValidationError):
         jobs.validate_params("reconcile", {"upload": "abc", "output": "/etc/passwd"})
+
+
+def test_web_job_whitelist_has_enrich_and_no_longer_accepts_classify_enrich_flag(tmp_path):
+    from research_workflow.web import jobs
+
+    argv = jobs.build_argv("enrich", jobs.validate_params("enrich", {}), project_id="p1", project_dir=tmp_path,
+                           upload_path=lambda u: tmp_path / u)
+    assert argv == ["enrich", "--project=p1"]
+    with pytest.raises(jobs.JobValidationError):
+        jobs.validate_params("classify", {"labels": {"n": "N"}, "enrich": True})
+    with pytest.raises(jobs.JobValidationError):
+        jobs.validate_params("enrich", {"live": True})

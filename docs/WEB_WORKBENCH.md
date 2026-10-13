@@ -1,6 +1,6 @@
 # Web 研究工作台(T4-1 / T4-2 / T4-3)
 
-研究员用浏览器完成:建项目 → 上传/取数 → 三个人工检查点 → 分析 → 下载资料包。多人使用,项目彼此隔离。
+研究员用浏览器完成:建项目 → 上传/取数 → 人工检查点(数据/补齐[可选]/分类/路线) → 分析 → 下载资料包。多人使用,项目彼此隔离。
 
 ## 启动
 
@@ -59,9 +59,11 @@ uv pip install -e '.[dev,workflow,data,xlsx]' -p .venv
 |---|---|
 | `discover-nodes` | `{keyword?, month?}` → 节点候选,**主节点必须人工确认** |
 | `ingest` | 文件模式 `{uploads:[upload_id...], month?, top_n?}`;取数模式 `{live:true, keyword, months:"auto"或"2025-01,2026-01", nodes?:[nodeIdPath...], candidate_n?, top_n?}` → 进入 `data_review` 检查点 |
-| `classify` | `{labels:{key:名称}, rules?:{key:"词1,词2"}, dimension?, provider?: rules\|llm, enrich?: bool}` → `classification_review` 检查点;`needs_review` 行必须在 resolve 时用 `edits` 指定 |
+| `enrich` | `{}` → 商品补齐(需 MCP 会话),完成后进入 `enrichment_review` 检查点,**确认前不能分类** |
+| `classify` | `{labels:{key:名称}, rules?:{key:"词1,词2"}, dimension?, provider?: rules\|llm}` → `classification_review` 检查点(不再支持 `enrich` 参数,补齐是独立步骤);`needs_review` 行必须在 resolve 时用 `edits` 指定 |
 | `analyze` | `{new_products_upload?, sales_threshold?, consecutive_months?, early_window?, promotion_threshold?, retention_threshold?, study_month?, pairs?, periods?}` → `research_route_review` 检查点 |
 | `resolve` | `{checkpoint_id, approve: bool, edits?:{ASIN:标签}, select?:[route_id...]}` —— **只能由用户明确点击触发,前端不得自动批准** |
+| `reconcile` | `{upload}`(参考表,列 key,expected[,tolerance_abs,tolerance_pct]) → 只读对账,结果写 `exports/reconcile.csv` |
 | `export-table` | `{table: 1\|2\|3}` → 生成 `exports/table{n}.csv`,经 exports 接口下载 |
 | `import-table` | `{table, upload: upload_id}` → 校验人工修改后的表;成功后旧审批失效并重新请求对应检查点(表1→data_review,表3→classification_review,表2→需重跑 classify);校验失败不改任何状态 |
 | `import-evidence` | `{kind: trends\|report-excerpts\|tiktok-units\|patents\|patent-search-log\|ads\|big-brand\|offsite\|cross-category, upload: upload_id, meta?: {key: value}}` → 登记外部证据(证据登记不是人工检查点,但文件哈希进入资料包 manifest);各 kind 必填的 meta 见 `skill/SKILL.md` |
@@ -71,7 +73,7 @@ uv pip install -e '.[dev,workflow,data,xlsx]' -p .venv
 
 ## 前端要求(红线)
 
-1. 三个人工检查点(`data_review` / `classification_review` / `research_route_review`)必须展示给用户并等待其明确点击;不得自动 `approve`。
+1. 人工检查点(`data_review` / `enrichment_review`[做了补齐才有] / `classification_review` / `research_route_review`)必须展示给用户并等待其明确点击;不得自动 `approve`。
 2. 不显示、不生成任何商业 Yes/No 结论;资料包的人工决策栏由用户自己填写。
 3. 缺月、待人工分类、补齐冲突、口径假设必须原样、醒目地展示(不得隐藏警告)。
 4. CSP 为 `default-src 'self'`:只能用独立的 `/static/*.js`、`/static/*.css`,不能内联脚本,不能引用 CDN。

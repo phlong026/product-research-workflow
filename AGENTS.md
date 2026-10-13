@@ -13,7 +13,7 @@ Amazon 跨境选品「研究工作流引擎」:数据获取 → 清洗 → 分�
 2. **LLM 不做算数**。所有指标由确定性 Python 计算(`metrics/`、`competition/`、`new_products/`);LLM 只做分类(`classification/`)和解释(`analysis/`),解释必须引用预计算证据 ID,引用不实的发现整条丢弃。
 3. **密钥只走环境变量**。`config/mcp.example.json` 只含 `${ENV_VAR}` 占位符;绝不提交真实 token/Cookie;`tests/test_mcp_secrets_t02.py` 会扫描。
 4. **Golden Case 冻结值不进生产计算**。`fixtures/golden_cases/ice_maker/baseline_metrics.json` 仅用于回归比对,不得改动或用于运行时逻辑。
-5. 人工检查点(`data_review` / `classification_review` / `route_review`)不可绕过或自动批复。
+5. 人工检查点(`data_review` / `enrichment_review`[做了补齐才有] / `classification_review` / `route_review`)不可绕过或自动批复。
 
 ## 环境与常用命令
 
@@ -65,6 +65,7 @@ RESEARCH_DB_PATH=runtime/api-experiment.db .venv/bin/python -m uvicorn research_
 | `competition/` | T08 | 集中度/BSR 累积层级/头腰尾带/虹吸信号 |
 | `new_products/` | T09 | launch success(连续达标)与 current survival 解耦,缺月=未知 |
 | `router/` | T10 | 规则化研究分支建议,人工 confirm 后生效 |
+| `reconcile.py` | 验收 | 指标与人工结果逐项对账(`reconcile` 命令,缺失不当 0) |
 | `dossier/` | T11 | JSON+CSV+Markdown+离线SVG HTML+SHA256 manifest |
 | `external_ingest.py` + `dossier/external.py` | T2-3~T2-7/T3-6~T3-9 | 外部证据登记(`import-evidence`,落 `external/`,索引哈希,**非检查点**)、预测/跨渠道接线、dossier「外部证据与预测」章节与 `外部_*` 工作表 |
 

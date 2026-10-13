@@ -1,6 +1,6 @@
 ---
 name: crossborder-product-research
-description: 跨境选品研究工作流。当用户要求研究亚马逊产品/类目市场(选品、市场分析、竞品分析、BSR 分析、新品分析、生成研究报告/资料包)时使用;由确定性引擎计算指标,在数据/分类/研究路线三个人工检查点等待用户确认。不用于一般编程或与选品研究无关的任务。
+description: 跨境选品研究工作流。当用户要求研究亚马逊产品/类目市场(选品、市场分析、竞品分析、BSR 分析、新品分析、生成研究报告/资料包)时使用;由确定性引擎计算指标,在数据/(补齐)/分类/研究路线人工检查点等待用户确认。不用于一般编程或与选品研究无关的任务。
 ---
 
 # 跨境选品研究工作流(Amazon Product Research)
@@ -9,7 +9,7 @@ description: 跨境选品研究工作流。当用户要求研究亚马逊产品/
 
 ## 红线(违反即失败)
 
-1. **三个人工检查点必须呈现给用户并等待明确答复**。用户说"确认/同意/通过"才能执行 `resolve --approve`;用户修改意见转成 `--edit`/`--select` 参数。绝不能代替用户批准、跳过检查点或自动选择。
+1. **人工检查点(数据、补齐[做了补齐才有]、分类、研究路线)必须呈现给用户并等待明确答复**。用户说"确认/同意/通过"才能执行 `resolve --approve`;用户修改意见转成 `--edit`/`--select` 参数。绝不能代替用户批准、跳过检查点或自动选择。
 2. **不产出商业 Yes/No**。汇报只陈述数字与证据,禁止出现"建议进入/不建议进入/最终决策"类结论;报告末尾的人工判断栏保持空白,由用户自己填写。
 3. **不编造数据**。所有数字必须来自引擎输出或用户提供的文件;引擎未算出的内容要明说"未计算/缺数据"。
 
@@ -37,7 +37,7 @@ description: 跨境选品研究工作流。当用户要求研究亚马逊产品/
 
 ## 运行边界
 
-分类默认使用规则；`classify --provider llm`（需 `ANTHROPIC_API_KEY` 与可选依赖 `.[llm]`，输出稳定性未做生产验收）会把歧义项标为待人工，待人工行必须用 `--edit` 逐一指定后才能批准；`classify --enrich` 经 SellerSprite 补齐缺失地区与卖点（需已登录，冲突写入 `enrichment.json` 供复核）；市场解释仍为确定性模板；确认研究路线只登记待办，不自动执行支线。上线边界见 `docs/RELEASE_READINESS.md`。重跑上游会使下游审批和工件失效；旧检查点不能审批新结果，缺销量/空月份数据须先修正。导出必须选择新的空目录。旧版本项目须从ingest重新人工复核。Codex注册仅保存令牌环境变量引用；启动Codex前须安全注入变量，不能假设它自动读取引擎`.env`。
+分类默认使用规则；`classify --provider llm`（需 `ANTHROPIC_API_KEY` 与可选依赖 `.[llm]`，输出稳定性未做生产验收）会把歧义项标为待人工，待人工行必须用 `--edit` 逐一指定后才能批准；`enrich` 经 SellerSprite 补齐缺失地区与卖点（需已登录，冲突写入 `enrichment.json`），补齐后必须在**补齐检查点 `enrichment_review`** 人工确认才能分类/分析/出资料包（不做补齐则无此关口；`classify --enrich` 已废弃）；市场解释仍为确定性模板；确认研究路线只登记待办，不自动执行支线。上线边界见 `docs/RELEASE_READINESS.md`。重跑上游会使下游审批和工件失效；旧检查点不能审批新结果，缺销量/空月份数据须先修正。导出必须选择新的空目录。旧版本项目须从ingest重新人工复核。Codex注册仅保存令牌环境变量引用；启动Codex前须安全注入变量，不能假设它自动读取引擎`.env`。
 
 ## 执行协议
 
@@ -63,9 +63,14 @@ $PY $ENGINE/scripts/run_research.py discover-nodes --project <ID> [--keyword "ic
 $PY $ENGINE/scripts/run_research.py ingest --project <ID> --live --keyword ... --months ... --nodes <nodeIdPath1,nodeIdPath2>
   → 按 节点×月 分存原始响应(raw/<月>__<节点>.json),多节点样本按 ASIN 合并去重
 
+# 商品补齐(可选;表2 的卖家所属地与卖点;需 SellerSprite 已登录)
+$PY $ENGINE/scripts/run_research.py enrich --project <ID>
+  → 补齐检查点 enrichment_review:展示补齐汇总、冲突、失败;确认前不能 classify;
+    驳回或被作废后 next=enrich;重新 enrich 会作废旧确认与下游分类
+
 $PY $ENGINE/scripts/run_research.py classify --project <ID> \
     --label "nugget=咀嚼冰" --label "bullet=子弹冰" \
-    [--rule "nugget=nugget, chewing ice"] [--provider rules|llm] [--enrich]
+    [--rule "nugget=nugget, chewing ice"] [--provider rules|llm]
   → 分类检查点 classification_review(标签体系由用户定义;--rule 关键词规则可选)
 
 $PY $ENGINE/scripts/run_research.py analyze --project <ID> \
@@ -112,7 +117,14 @@ $PY $ENGINE/scripts/run_research.py export-table --project <ID> --table 1|2|3 --
 # 用户在表格软件中修改(不得增删列;表1 不能新增行,销量缺失不得当 0;表3 标签须在体系内;卖点用 || 分隔)
 $PY $ENGINE/scripts/run_research.py import-table --project <ID> --table 1|2|3 --file <修改后文件>
 ```
-校验失败不改任何状态;成功后旧审批立即失效:表1 → 重新请求 data_review;表3 → 重新请求 classification_review;表2 → 需重跑 classify。只有重新确认的版本才会进入下游。
+校验失败不改任何状态;成功后旧审批立即失效:表1 → 重新请求 data_review;表3 → 重新请求 classification_review;表2 → 重新请求 enrichment_review(保留机器补齐,人工修改优先),确认后再 classify。只有重新确认的版本才会进入下游。
+
+验收对账(只读;参考表列 key,expected[,tolerance_abs,tolerance_pct],key 形如 market.2026-01.total_sales / point_rank.2026-01.3.sales / new_products.summary.retention_rate_pct):
+
+```bash
+$PY $ENGINE/scripts/run_research.py reconcile --project <ID> --reference <参考表> [--output <差异报告.csv>]
+```
+全部 MATCH 才算通过;MISMATCH/MISSING(未知)须逐项查明原因,不得为凑数改容差,缺失不会被当作 0。
 
 裁决与恢复:
 
@@ -131,6 +143,7 @@ $PY $ENGINE/scripts/run_research.py projects
 | 检查点 | 向用户展示 | 用户答复 → 动作 |
 |---|---|---|
 | data_review | 每月 输入/输出行数、两级去重删除数、质量警告数 | "确认"→`--approve`;提出问题→`--reject`,按用户修正后重新 ingest |
+| enrichment_review | 补齐汇总(补了多少地区/卖点)、冲突与失败清单、是否含人工修改的表2(来自 enrich/import-table 输出与 status 的检查点载荷) | "确认"→`--approve`;要改→`export-table --table 2` 修改后 `import-table` 回传(会重新请求本检查点);驳回→`--reject` 后重新 `enrich` |
 | classification_review | 各标签数量 + 从 `<项目目录>/classification.json` 读取每个 ASIN 的标签/置信度/理由 | "确认"→`--approve`;改分类→`--approve --edit ASIN=标签` |
 | research_route_review | 每条建议的标题/理由/优先级(来自 analyze 输出) | 多选→`--approve --select id1,id2`(也允许不选任何支线直接 `--approve`) |
 

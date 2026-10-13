@@ -27,7 +27,7 @@ logger = logging.getLogger("research_workflow.web.jobs")
 MONTH = r"^\d{4}-\d{2}$"
 KEY = r"^[A-Za-z0-9_.:-]{1,64}$"
 ASIN = r"^[A-Za-z0-9]{1,20}$"
-COMMAND_TIMEOUTS = {"ingest": 3600, "discover-nodes": 900, "classify": 1800, "analyze": 900,
+COMMAND_TIMEOUTS = {"ingest": 3600, "discover-nodes": 900, "enrich": 1800, "classify": 1800, "analyze": 900,
                     "resolve": 300, "dossier": 600, "export-table": 120, "import-table": 300,
                     "import-evidence": 300, "build-market-forecast": 300, "build-cross-channel": 300,
                     "reconcile": 300}
@@ -60,7 +60,10 @@ class ClassifyParams(_Params):
     rules: dict[str, str] = Field(default_factory=dict, max_length=50)
     dimension: str = Field(default="segment", min_length=1, max_length=64)
     provider: str = Field(default="rules", pattern="^(rules|llm)$")
-    enrich: bool = False
+
+
+class EnrichParams(_Params):
+    """商品补齐无参数;完成后进入补齐检查点,必须人工确认才能分类。"""
 
 
 class ResolveParams(_Params):
@@ -127,7 +130,7 @@ class ReconcileParams(_Params):
 
 
 PARAM_MODELS: dict[str, type[_Params]] = {
-    "ingest": IngestParams, "discover-nodes": DiscoverParams, "classify": ClassifyParams,
+    "ingest": IngestParams, "discover-nodes": DiscoverParams, "enrich": EnrichParams, "classify": ClassifyParams,
     "resolve": ResolveParams, "analyze": AnalyzeParams, "dossier": DossierParams,
     "export-table": ExportTableParams, "import-table": ImportTableParams,
     "import-evidence": ImportEvidenceParams, "build-market-forecast": MarketForecastParams,
@@ -210,8 +213,6 @@ def build_argv(command: str, params: _Params, *, project_id: str, project_dir: P
         argv += [f"--label={k}={v}" for k, v in p["labels"].items()]
         argv += [f"--rule={k}={v}" for k, v in p["rules"].items()]
         argv += [f"--dimension={p['dimension']}", f"--provider={p['provider']}"]
-        if p["enrich"]:
-            argv.append("--enrich")
     elif command == "resolve":
         argv += [f"--checkpoint={p['checkpoint_id']}", "--approve" if p["approve"] else "--reject"]
         argv += [f"--edit={k}={v}" for k, v in p["edits"].items()]
