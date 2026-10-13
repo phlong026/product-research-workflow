@@ -80,6 +80,15 @@ $PY $ENGINE/scripts/run_research.py dossier --project <ID> --output $ENGINE/runt
   → 生成 report.md / dashboard.html / data.json / csv/ / manifest.json
 ```
 
+三张表的人工校正(表1=清洗月度数据,表2=唯一 ASIN 的地区/卖点,表3=分类结果):
+
+```bash
+$PY $ENGINE/scripts/run_research.py export-table --project <ID> --table 1|2|3 --output <文件.csv>
+# 用户在表格软件中修改(不得增删列;表1 不能新增行,销量缺失不得当 0;表3 标签须在体系内;卖点用 || 分隔)
+$PY $ENGINE/scripts/run_research.py import-table --project <ID> --table 1|2|3 --file <修改后文件>
+```
+校验失败不改任何状态;成功后旧审批立即失效:表1 → 重新请求 data_review;表3 → 重新请求 classification_review;表2 → 需重跑 classify。只有重新确认的版本才会进入下游。
+
 裁决与恢复:
 
 ```bash

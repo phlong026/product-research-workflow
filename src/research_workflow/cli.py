@@ -51,9 +51,9 @@ from research_workflow.data import (
     month_coverage_report,
 )
 from research_workflow.discovery import discover_nodes, fetch_monthly_top, merge_nodes_by_asin
-from research_workflow.data.io import read_tabular_rows
+from research_workflow.data.io import read_tabular_rows, write_csv_rows
 from research_workflow.data.models import BSRRecord, MonthlyBSRResult
-from research_workflow.data.bsr_pipeline import validate_month, _to_int
+from research_workflow.data.bsr_pipeline import normalize_seller_region, validate_month, _to_int
 from research_workflow.connectors.base import ConnectorError
 from research_workflow.connectors.sellersprite import SellerSpriteConnector
 from research_workflow.domain import ProjectStatus, StepStatus
@@ -69,6 +69,7 @@ from research_workflow.enrichment import (
     enrich_bullets_unique_asins,
     enrich_missing_regions,
 )
+from research_workflow.enrichment.adapters import split_region_and_account_type
 from research_workflow.enrichment.models import ASINProfile
 from research_workflow.mcp import MCPGateway, MCPRegistry
 from research_workflow.metrics import build_market_metrics
@@ -262,14 +263,19 @@ def _load_records(pdir: Path, *, overlay: bool = True) -> list[BSRRecord]:
     records: list[BSRRecord] = []
     for month in sorted(by_month):
         records.extend(rebuild(BSRRecord, row) for row in by_month[month])
-    enrichment_path = pdir / "enrichment.json"
-    if overlay and enrichment_path.is_file():
-        # 补齐只填 UNKNOWN 地区,不改人工审过的 records.json(其哈希已绑定 data_review)。
-        regions = _load_json(enrichment_path).get("regions", {})
+    if overlay:
+        # 补齐/人工表2 只填 UNKNOWN 地区,不改人工审过的 records.json(其哈希已绑定 data_review)。
+        regions = dict(_load_json(pdir / "enrichment.json").get("regions", {})) if (pdir / "enrichment.json").is_file() else {}
+        regions.update(_table2_edits(pdir).get("regions", {}))
         for record in records:
             if record.seller_region in ("", "UNKNOWN") and regions.get(record.asin):
                 record.seller_region = regions[record.asin]
     return records
+
+
+def _table2_edits(pdir: Path) -> dict[str, Any]:
+    path = pdir / "table2_edits.json"
+    return _load_json(path) if path.is_file() else {}
 
 
 def _parse_kv(items: list[str], what: str) -> dict[str, str]:
@@ -286,7 +292,7 @@ STAGES = ["collect_bsr", "data_review", "enrich_asins", "classify", "classificat
           "apply_classification_review", "market_metrics", "market_analysis", "competition_metrics",
           "new_product_analysis", "research_route", "route_review", "research_route_review",
           "apply_route_review", "dossier"]
-DERIVED_FILES = {"classify": ["classification.json", "enrichment.json"], "market_metrics": ["market_metrics.json",
+DERIVED_FILES = {"collect_bsr": ["table2_edits.json"], "classify": ["classification.json", "enrichment.json"], "market_metrics": ["market_metrics.json",
                  "market_analysis.json", "competition.json", "new_products.json", "route_plan.json",
                  "analysis_context.json", "new_product_queue.json", "iteration.json"]}
 
@@ -666,6 +672,13 @@ def cmd_classify(args: argparse.Namespace) -> None:
             ),
         )
     enrichment = _run_enrichment(args, project, records, profiles) if args.enrich else None
+    table2 = _table2_edits(pdir)  # 人工校正的表2 优先于机器补齐
+    for asin, bullets in table2.get("bullets", {}).items():
+        if asin in profiles:
+            profiles[asin].bullets = list(bullets)
+    for asin, region in table2.get("regions", {}).items():
+        if asin in profiles:
+            profiles[asin].seller_region = region
 
     labels = [
         ClassificationLabel(key=key, name=name)
@@ -697,7 +710,8 @@ def cmd_classify(args: argparse.Namespace) -> None:
          "needs_review": needs_review,
          "enrichment": ({"summary": enrichment["summary"], "conflicts": enrichment["conflicts"],
                          "failures": enrichment["failures"]} if enrichment else None),
-         "artifact_hashes": _hashes(pdir, ["classification.json"] + (["enrichment.json"] if enrichment else []))})
+         "artifact_hashes": _hashes(pdir, ["classification.json"] + (["enrichment.json"] if enrichment else [])
+                                    + (["table2_edits.json"] if table2 else []))})
 
     counts: dict[str, int] = {}
     for row in batch.rows.values():
@@ -1020,7 +1034,8 @@ def cmd_dossier(args: argparse.Namespace) -> None:
     approvals = svc.store.get_state(args.project).get("approved_checkpoints", {})
     evidence_names = ["records.json", "quality.json", "sources.json", "classification.json", "analysis_context.json",
                       "market_metrics.json", "market_analysis.json", "competition.json", "new_products.json", "route_plan.json",
-                      "new_product_queue.json", "iteration.json", "enrichment.json", "coverage.json", "nodes.json"]
+                      "new_product_queue.json", "iteration.json", "enrichment.json", "coverage.json", "nodes.json",
+                      "table2_edits.json", "table_edits.json"]
     evidence_files = {name: pdir / name for name in evidence_names if (pdir / name).is_file()}
     evidence_files.update({source.sha256 + Path(source.source).suffix: (Path(source.source) if Path(source.source).is_absolute() else pdir / source.source) for source in sources})
     approval_history = {key: dataclasses.asdict(svc.store.get_checkpoint(value)) for key,value in approvals.items()}
@@ -1074,6 +1089,251 @@ def cmd_dossier(args: argparse.Namespace) -> None:
             "next": "向用户汇报研究发现;最终商业 Yes/No 由人工填写,系统不代填",
         }
     )
+
+
+# --- 三张表的人工校正协议(T1-9):导出 → 修改 → 上传校验 → 旧审批失效 → 重新确认 ---
+
+TABLE1_COLUMNS = ["month", "asin", "brand", "title", "monthly_sales", "node_rank", "sales_rank", "seller_region",
+                  "launch_date", "parent_asin", "seller_id", "rating", "rating_count"]
+TABLE1_EDITABLE = [c for c in TABLE1_COLUMNS if c not in {"month", "asin"}]
+TABLE2_COLUMNS = ["asin", "title", "brand", "seller_region", "bullets"]
+TABLE3_COLUMNS = ["asin", "label", "confidence", "evidence", "needs_review", "review_reason"]
+BULLET_SEP = "||"
+
+
+def _cell(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
+def _read_table(path: str, required: list[str], allowed: list[str]) -> list[dict[str, str]]:
+    file = Path(path)
+    if not file.is_file():
+        raise ValueError(f"文件不存在: {path}")
+    rows = [{str(k).strip(): _cell(v) for k, v in row.items() if k is not None} for row in read_tabular_rows(file)]
+    if not rows:
+        raise ValueError("上传的表格为空;若要删除全部数据请重新 ingest")
+    columns = set(rows[0])
+    missing = [c for c in required if c not in columns]
+    if missing:
+        raise ValueError(f"缺少必需列: {missing}")
+    unknown = sorted(columns - set(allowed))
+    if unknown:
+        raise ValueError(f"含未知列(请使用导出表的列,不要增删列): {unknown}")
+    return rows
+
+
+def _asin_views(pdir: Path) -> tuple[dict[str, BSRRecord], dict[str, list[str]]]:
+    """表2 的当前视图:每个 ASIN 取最新月份记录(地区已叠加补齐/人工),卖点取人工 > 机器补齐。"""
+    latest: dict[str, BSRRecord] = {}
+    for record in _load_records(pdir):
+        if record.asin not in latest or record.month >= latest[record.asin].month:
+            latest[record.asin] = record
+    bullets: dict[str, list[str]] = {}
+    if (pdir / "enrichment.json").is_file():
+        bullets.update({a: list(v) for a, v in _load_json(pdir / "enrichment.json").get("bullets", {}).items()})
+    bullets.update({a: list(v) for a, v in _table2_edits(pdir).get("bullets", {}).items()})
+    return latest, bullets
+
+
+def cmd_export_table(args: argparse.Namespace) -> None:
+    svc = _service(args)
+    if svc.store.get_project(args.project) is None:
+        raise KeyError(f"Unknown project: {args.project}")
+    pdir = _project_dir(args, args.project)
+    if args.table == 1:
+        rows = [{c: getattr(r, c) for c in TABLE1_COLUMNS} for r in _load_records(pdir, overlay=False)]
+    elif args.table == 2:
+        latest, bullets = _asin_views(pdir)
+        rows = [{"asin": a, "title": r.title, "brand": r.brand, "seller_region": r.seller_region,
+                 "bullets": f" {BULLET_SEP} ".join(bullets.get(a, []))} for a, r in sorted(latest.items())]
+    else:
+        envelope = _require_file(pdir / "classification.json", "尚无分类结果;先运行 classify")
+        rows = [{"asin": a, **{c: row.get(c, "") for c in TABLE3_COLUMNS[1:]}}
+                for a, row in sorted(envelope["batch"]["rows"].items())]
+    write_csv_rows(args.output, rows)
+    _emit({"project_id": args.project, "table": args.table, "rows": len(rows), "file": str(Path(args.output).resolve()),
+           "next": "在表格软件中修改后,用 import-table 上传;修改后旧审批失效,需重新人工确认"})
+
+
+def _parse_table1(rows: list[dict[str, str]], current: list[BSRRecord]) -> tuple[list[BSRRecord], int, int]:
+    index = {(r.month, r.asin): r for r in current}
+    seen: set[tuple[str, str]] = set()
+    updated: list[BSRRecord] = []
+    changed = 0
+    for number, row in enumerate(rows, start=2):
+        key = (row["month"], row["asin"].upper())
+        if key not in index:
+            raise ValueError(f"第 {number} 行 {key} 不存在于当前表1;不能新增行(请重新 ingest)")
+        if key in seen:
+            raise ValueError(f"第 {number} 行 {key} 重复")
+        seen.add(key)
+        sales = _to_int(row.get("monthly_sales"), None) if "monthly_sales" in row else None
+        if sales is None:
+            raise ValueError(f"第 {number} 行销量必须是非负整数,缺失不能当作 0")
+        base = index[key]
+        edited = dataclasses.replace(base, monthly_sales=sales)
+        for column in TABLE1_EDITABLE:
+            if column == "monthly_sales" or column not in row:
+                continue
+            text = row[column]
+            if column in {"node_rank", "sales_rank", "rating_count"}:
+                value: Any = _to_int(text, None) if text else None
+                if text and value is None:
+                    raise ValueError(f"第 {number} 行 {column} 必须是非负整数")
+            elif column == "rating":
+                try:
+                    value = float(text) if text else None
+                except ValueError as exc:
+                    raise ValueError(f"第 {number} 行 rating 必须是数字") from exc
+            elif column == "seller_region":
+                value = normalize_seller_region(text)
+            elif column in {"launch_date"}:
+                value = text or None
+            else:
+                value = text
+            edited = dataclasses.replace(edited, **{column: value})
+        changed += sum(getattr(edited, c) != getattr(base, c) for c in TABLE1_EDITABLE)
+        updated.append(edited)
+    # 删除后每个月至少保留 1 行:空月份不能当作零销量市场
+    kept_months = {r.month for r in updated}
+    empty = sorted({r.month for r in current} - kept_months)
+    if empty:
+        raise ValueError(f"以下月份被全部删除,空数据不能作为零销量市场: {empty}")
+    return updated, changed, len(current) - len(updated)
+
+
+def _rerank(records: list[BSRRecord]) -> list[BSRRecord]:
+    by_month: dict[str, list[BSRRecord]] = {}
+    for record in records:
+        by_month.setdefault(record.month, []).append(record)
+    out: list[BSRRecord] = []
+    for month in sorted(by_month):
+        ordered = sorted(by_month[month], key=lambda r: (-r.monthly_sales,
+                         r.node_rank if r.node_rank is not None else 10**9, r.asin))
+        out.extend(dataclasses.replace(r, sales_rank=i) for i, r in enumerate(ordered, start=1))
+    return out
+
+
+def _import_table1(svc: WorkflowService, args: argparse.Namespace, pdir: Path) -> None:
+    rows = _read_table(args.file, ["month", "asin", "monthly_sales"], TABLE1_COLUMNS)
+    for row in rows:
+        row["month"] = validate_month(row["month"])
+    current = _load_records(pdir, overlay=False)
+    updated, changed, deleted = _parse_table1(rows, current)
+    if changed == 0 and deleted == 0:
+        raise ValueError("上传的表1与当前内容完全相同;没有需要重新审批的修改")
+    updated = _rerank(updated)
+    snapshot = _snapshot_source(pdir, Path(args.file))
+    previous_hash = _sha256_file(pdir / "records.json")
+
+    _invalidate(svc, args.project, pdir, "collect_bsr")
+    by_month: dict[str, list[dict[str, Any]]] = {}
+    for record in updated:
+        by_month.setdefault(record.month, []).append(record.to_dict())
+    _save_json(pdir / "records.json", by_month)
+    sources = _load_json(pdir / "sources.json")
+    artifact_id = f"table1-edit:{_sha256_file(snapshot)[:12]}"
+    sources[artifact_id] = {"artifact_id": artifact_id, "name": f"人工校正表1 {Path(args.file).name}", "kind": "human_table1",
+                            "source": snapshot.relative_to(pdir).as_posix(), "sha256": _sha256_file(snapshot)}
+    _save_json(pdir / "sources.json", sources)
+    edits_log = _load_json(pdir / "table_edits.json") if (pdir / "table_edits.json").is_file() else []
+    edits_log.append({"table": 1, "file_sha256": _sha256_file(snapshot), "changed_cells": changed,
+                      "deleted_rows": deleted, "previous_records_sha256": previous_hash, "edited_at": utc_now_iso()})
+    _save_json(pdir / "table_edits.json", edits_log)
+
+    svc.set_step(args.project, "collect_bsr", StepStatus.COMPLETED, output_ref="records.json")
+    summary = {m: {"output_rows": len(v)} for m, v in sorted(by_month.items())}
+    checkpoint = svc.request_human_checkpoint(
+        args.project, "data_review",
+        "表1 已被人工修改并重新上传,请复核修改后的月度数据;确认前下游不可继续。",
+        {"months": summary, "sources": list(sources.values()), "source_mode": "human_table1",
+         "table_edit": edits_log[-1], "missing_months": [],
+         "artifact_hashes": _hashes(pdir, ["records.json", "quality.json", "sources.json", "table_edits.json"])})
+    _emit({"project_id": args.project, "table": 1, "changed_cells": changed, "deleted_rows": deleted,
+           "checkpoint_id": checkpoint.id, "checkpoint_step": "data_review",
+           "next": "resolve --approve 重新确认表1 后再 classify"})
+
+
+def _import_table2(svc: WorkflowService, args: argparse.Namespace, pdir: Path) -> None:
+    rows = _read_table(args.file, ["asin"], TABLE2_COLUMNS)
+    latest, bullets = _asin_views(pdir)
+    edits = _table2_edits(pdir)
+    regions: dict[str, str] = dict(edits.get("regions", {}))
+    bullet_edits: dict[str, list[str]] = {a: list(v) for a, v in edits.get("bullets", {}).items()}
+    changed = 0
+    for number, row in enumerate(rows, start=2):
+        asin = row["asin"].upper()
+        if asin not in latest:
+            raise ValueError(f"第 {number} 行 ASIN {asin} 不存在于表1")
+        if "seller_region" in row and row["seller_region"]:
+            region, account_type = split_region_and_account_type(row["seller_region"])
+            if account_type:
+                raise ValueError(f"第 {number} 行 {row['seller_region']} 是账号类型而非地理国家,请填写卖家所属国家/地区")
+            if region != "UNKNOWN":
+                changed += region != latest[asin].seller_region
+                regions[asin] = region
+        if "bullets" in row:
+            parsed = [b.strip() for b in row["bullets"].split(BULLET_SEP) if b.strip()]
+            changed += parsed != bullets.get(asin, [])
+            if parsed:
+                bullet_edits[asin] = parsed
+    if changed == 0:
+        raise ValueError("上传的表2与当前内容完全相同;没有需要重新审批的修改")
+    snapshot = _snapshot_source(pdir, Path(args.file))
+    _invalidate(svc, args.project, pdir, "enrich_asins")  # 分类依赖卖点/地区,需重跑并重新审批
+    _save_json(pdir / "table2_edits.json", {"regions": regions, "bullets": bullet_edits,
+                                            "file_sha256": _sha256_file(snapshot), "edited_at": utc_now_iso()})
+    _emit({"project_id": args.project, "table": 2, "changed_cells": changed,
+           "next": "重新运行 classify(表2 的人工修改会被采用),并重新确认分类检查点"})
+
+
+def _import_table3(svc: WorkflowService, args: argparse.Namespace, pdir: Path) -> None:
+    rows = _read_table(args.file, ["asin", "label"], TABLE3_COLUMNS)
+    envelope = _require_file(pdir / "classification.json", "尚无分类结果;先运行 classify")
+    schema = rebuild(ClassificationSchema, envelope["schema"])
+    batch = rebuild(ClassificationBatch, envelope["batch"])
+    uploaded = {row["asin"].upper(): row["label"] for row in rows}
+    if len(uploaded) != len(rows):
+        raise ValueError("表3 含重复 ASIN")
+    if set(uploaded) != set(batch.rows):
+        raise ValueError(f"表3 的 ASIN 集合必须与当前分类一致(缺少 {sorted(set(batch.rows) - set(uploaded))},"
+                         f"多出 {sorted(set(uploaded) - set(batch.rows))})")
+    invalid = sorted({label for label in uploaded.values() if label not in schema.allowed_labels})
+    if invalid:
+        raise ValueError(f"含不在标签体系内的标签: {invalid};允许: {sorted(schema.allowed_labels)}")
+    edits = {asin: label for asin, label in uploaded.items() if label != batch.rows[asin].label}
+    if not edits:
+        raise ValueError("上传的表3与当前分类完全相同;没有需要重新审批的修改")
+    snapshot = _snapshot_source(pdir, Path(args.file))
+    edited = ClassificationService(RuleClassificationProvider({})).apply_human_edits(schema, batch, edits)
+    edited = dataclasses.replace(edited, approved=False)  # 批准只能由人在检查点上做出
+
+    _invalidate(svc, args.project, pdir, "classification_review")
+    _save_json(pdir / "classification.json", {**envelope, "batch": edited.to_dict(), "human_edited": True,
+                                              "table_edit_sha256": _sha256_file(snapshot)})
+    needs_review = sorted(a for a, row in edited.rows.items() if row.needs_review)
+    checkpoint = svc.request_human_checkpoint(
+        args.project, "classification_review",
+        "表3 已被人工修改并重新上传,请复核分类;确认前下游不可继续。",
+        {"schema": schema.canonical_payload(), "classification": edited.to_dict(), "needs_review": needs_review,
+         "table_edit": {"table": 3, "changed_labels": len(edits), "file_sha256": _sha256_file(snapshot)},
+         "artifact_hashes": _hashes(pdir, ["classification.json"] + [n for n in ("enrichment.json", "table2_edits.json")
+                                                                      if (pdir / n).is_file()])})
+    _emit({"project_id": args.project, "table": 3, "changed_labels": len(edits), "needs_review": needs_review,
+           "checkpoint_id": checkpoint.id, "checkpoint_step": "classification_review",
+           "next": "resolve --approve 重新确认分类后再 analyze"})
+
+
+def cmd_import_table(args: argparse.Namespace) -> None:
+    svc = _service(args)
+    if svc.store.get_project(args.project) is None:
+        raise KeyError(f"Unknown project: {args.project}")
+    pdir = _project_dir(args, args.project)
+    {1: _import_table1, 2: _import_table2, 3: _import_table3}[args.table](svc, args, pdir)
 
 
 def cmd_projects(args: argparse.Namespace) -> None:
@@ -1144,6 +1404,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help="分类提供者:rules=关键词规则(默认);llm=大模型(需 ANTHROPIC_API_KEY,歧义标待人工)")
     p.add_argument("--enrich", action="store_true", help="分类前经 SellerSprite 补齐缺失地区与卖点(需已登录)")
     p.set_defaults(func=cmd_classify)
+
+    p = sub.add_parser("export-table", help="导出表1(清洗月度数据)/表2(唯一 ASIN 卖点地区)/表3(分类结果)供人工修改")
+    p.add_argument("--project", required=True)
+    p.add_argument("--table", type=int, choices=[1, 2, 3], required=True)
+    p.add_argument("--output", required=True)
+    p.set_defaults(func=cmd_export_table)
+
+    p = sub.add_parser("import-table", help="上传人工修改后的表;校验通过后旧审批失效并重新请求人工确认")
+    p.add_argument("--project", required=True)
+    p.add_argument("--table", type=int, choices=[1, 2, 3], required=True)
+    p.add_argument("--file", required=True)
+    p.set_defaults(func=cmd_import_table)
 
     p = sub.add_parser("projects", help="列出全部研究项目(跨会话恢复用)")
     p.set_defaults(func=cmd_projects)
