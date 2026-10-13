@@ -1,0 +1,24 @@
+:root { --bg:#f6f7f9; --fg:#1d2330; --muted:#667085; --card:#fff; --line:#e2e5ea; --accent:#2457d6; --warn:#b54708; --ok:#067647; --bad:#b42318; }
+@media (prefers-color-scheme: dark) { :root { --bg:#12151b; --fg:#e6e9ef; --muted:#9aa3b2; --card:#1b2029; --line:#2b3240; --accent:#6c93ff; --warn:#f79009; --ok:#47cd89; --bad:#f97066; } }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; }
+header { display:flex; align-items:center; gap:12px; padding:12px 20px; background:var(--card); border-bottom:1px solid var(--line); }
+header h1 { font-size:16px; margin:0; flex:1; }
+main { max-width:1100px; margin:0 auto; padding:16px; }
+section, .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:14px 16px; margin-bottom:14px; }
+h2 { font-size:15px; margin:0 0 10px; }
+label { display:block; margin:8px 0 2px; color:var(--muted); font-size:12px; }
+input, select, textarea, button { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:6px 8px; max-width:100%; }
+input[type=text], input[type=password], input[type=number], select, textarea { width:100%; }
+input[type=checkbox] { width:auto; margin-right:6px; }
+button { cursor:pointer; background:var(--accent); color:#fff; border-color:var(--accent); }
+button.secondary { background:transparent; color:var(--fg); border-color:var(--line); }
+button:disabled { opacity:.5; cursor:not-allowed; }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th, td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+pre { background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:8px; overflow:auto; max-height:260px; font-size:12px; }
+.row { display:flex; gap:14px; flex-wrap:wrap; } .row > * { flex:1 1 300px; }
+.badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; border:1px solid var(--line); }
+.queued,.running { color:var(--warn); } .succeeded { color:var(--ok); } .failed { color:var(--bad); }
+.muted { color:var(--muted); } .err { color:var(--bad); }
+a { color:var(--accent); }
