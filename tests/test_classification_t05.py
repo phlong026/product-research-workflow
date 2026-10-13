@@ -87,3 +87,26 @@ def test_classification_review_is_a_real_human_checkpoint():
     assert cp.step_key == "classification_review"
     assert snapshot["project"]["status"] == "paused"
     assert snapshot["state"]["pending_checkpoint_id"] == cp.id
+
+
+def test_rule_classifier_multi_match_goes_to_review_but_zero_match_is_plain_unknown():
+    schema = ice_schema()
+    provider = RuleClassificationProvider({"bullet": ["bullet"], "nugget": ["nugget"], "cube": ["cube"]})
+    service = ClassificationService(provider)
+    batch = asyncio.run(
+        service.classify(
+            schema,
+            [
+                ASINProfile(asin="M1", title="Nugget and Cube Ice Maker"),
+                ASINProfile(asin="Z1", title="Ice Maker"),
+                ASINProfile(asin="S1", title="Bullet Ice Maker"),
+            ],
+        )
+    )
+    multi, zero, single = batch.rows["M1"], batch.rows["Z1"], batch.rows["S1"]
+    assert multi.label == "unknown" and multi.needs_review is True
+    assert multi.review_reason == "多个标签同时命中: cube,nugget"  # 标签按名称排序,输出稳定
+    # 零命中是显式"未归类"类别:保持 unknown,不进待人工
+    assert zero.label == "unknown" and zero.needs_review is False and zero.review_reason == ""
+    assert single.label == "bullet" and single.needs_review is False
+
