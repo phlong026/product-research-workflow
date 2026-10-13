@@ -37,7 +37,7 @@ description: 跨境选品研究工作流。当用户要求研究亚马逊产品/
 
 ## 运行边界
 
-当前CLI使用规则分类和模板解释，不调用LLM；ASIN补全跳过；确认研究路线只登记待办，不自动执行支线。上线边界见 `docs/RELEASE_READINESS.md`。重跑上游会使下游审批和工件失效；旧检查点不能审批新结果，缺销量/空月份数据须先修正。导出必须选择新的空目录。旧版本项目须从ingest重新人工复核。Codex注册仅保存令牌环境变量引用；启动Codex前须安全注入变量，不能假设它自动读取引擎`.env`。
+默认使用规则分类和模板解释；`enrich` 补齐卖点/卖家所属地后可用 `classify --provider llm`（Claude，密钥走 `ANTHROPIC_API_KEY`，需 `.[llm]` 依赖，真实分类质量与费用尚未验收）；未执行 enrich 时补全显示为 skipped。确认研究路线只登记待办，不自动执行支线。指标口径见 `docs/METRIC_DEFINITIONS.md`。上线边界见 `docs/RELEASE_READINESS.md`。重跑上游会使下游审批和工件失效；旧检查点不能审批新结果，缺销量/空月份数据须先修正。导出必须选择新的空目录。旧版本项目须从ingest重新人工复核。Codex注册仅保存令牌环境变量引用；启动Codex前须安全注入变量，不能假设它自动读取引擎`.env`。
 
 ## 执行协议
 
@@ -55,10 +55,24 @@ $PY $ENGINE/scripts/run_research.py ingest --project <ID> --live \
     --keyword "ice maker" --months 2025-01,2026-01 [--max-pages 20]
   → 原始响应留档 <项目目录>/raw/,同样进入数据检查点
 
+# 类目节点（可选，多节点研究）：先发现、人工确认，再按节点取数（同月多节点自动合并去重）
+$PY $ENGINE/scripts/run_research.py nodes-discover --project <ID> (--file <含节点字段的取样表> | --live --keyword "ice maker")
+$PY $ENGINE/scripts/run_research.py nodes-confirm --project <ID> --node <主节点> [--node <相关节点>...]
+$PY $ENGINE/scripts/run_research.py ingest --project <ID> --live --months ... [--node <节点>...]
+
+# 商品补齐（表2：卖点、卖家所属地）；离线用人工明细表，亦用于上传修改后的表2
+# 补齐后会生成检查点 enrichment_review，必须人工 resolve --approve 后才能 classify/analyze/dossier
+$PY $ENGINE/scripts/run_research.py enrich --project <ID> (--live | --details-file <明细表>)
+
 $PY $ENGINE/scripts/run_research.py classify --project <ID> \
     --label "nugget=咀嚼冰" --label "bullet=子弹冰" \
-    [--rule "nugget=nugget, chewing ice"]
+    [--rule "nugget=nugget, chewing ice"] [--provider llm [--model <模型ID>]]
   → 分类检查点 classification_review(标签体系由用户定义;--rule 关键词规则可选)
+
+# 过程表人工检查/修改/上传（1=清洗Top 2=商品补齐 3=分类）
+$PY $ENGINE/scripts/run_research.py table-export --project <ID> --table 1 --output <x.xlsx|x.csv>
+$PY $ENGINE/scripts/run_research.py table-import --project <ID> --table 1 --file <修改后的表1>   # 差异留痕并重新发起 data_review
+# 表3 修改后：resolve --approve --edits-file <修改后的表3>
 
 $PY $ENGINE/scripts/run_research.py analyze --project <ID> \
     [--pair 2025-01:2026-01] [--period 2025-01:2025-04:2026-01:2026-04] \
@@ -66,7 +80,7 @@ $PY $ENGINE/scripts/run_research.py analyze --project <ID> \
   → 路线检查点 research_route_review
 
 $PY $ENGINE/scripts/run_research.py dossier --project <ID> --output $ENGINE/runtime/<ID>/dossier
-  → 生成 report.md / dashboard.html / data.json / csv/ / manifest.json
+  → 生成 report.md / dashboard.html / workbook.xlsx(可编辑综合工作簿) / data.json / csv/ / manifest.json
 ```
 
 裁决与恢复:
@@ -86,6 +100,7 @@ $PY $ENGINE/scripts/run_research.py projects
 | 检查点 | 向用户展示 | 用户答复 → 动作 |
 |---|---|---|
 | data_review | 每月 输入/输出行数、两级去重删除数、质量警告数 | "确认"→`--approve`;提出问题→`--reject`,按用户修正后重新 ingest |
+| enrichment_review | 补齐覆盖率、缺失商品、无卖点商品（来自 enrich 输出和 status 的检查点载荷）；可 `table-export --table 2` 导出表2 修改 | "确认"→`--approve`;要改→修改后 `enrich --details-file` 重新上传（旧确认作废）;驳回→`--reject` 后重新 enrich |
 | classification_review | 各标签数量 + 从 `<项目目录>/classification.json` 读取每个 ASIN 的标签/置信度/理由 | "确认"→`--approve`;改分类→`--approve --edit ASIN=标签` |
 | research_route_review | 每条建议的标题/理由/优先级(来自 analyze 输出) | 多选→`--approve --select id1,id2`(也允许不选任何支线直接 `--approve`) |
 

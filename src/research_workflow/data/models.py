@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
@@ -16,6 +16,10 @@ class BSRRecord:
     node_rank: int | None = None
     launch_date: str | None = None
     image_url: str | None = None
+    seller: str = ""
+    rating: float | None = None
+    rating_count: int | None = None
+    node_ids: list[str] = field(default_factory=list)
     source_row: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -31,6 +35,7 @@ class PipelineStats:
     parent_deduped_rows: int
     suspicious_deduped_rows: int
     output_rows: int
+    metric_deduped_rows: int | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -43,6 +48,10 @@ class DataQualityReport:
     missing_rank_rows: int = 0
     duplicate_parent_rows_removed: int = 0
     duplicate_title_rows_removed: int = 0
+    duplicate_metric_rows_removed: int = 0
+    # 缺评分/评分数的行无法按“销量+评分+评分数相同”判重，保留并计数，不当作重复也不当作零。
+    dedupe_unjudgeable_rows: int = 0
+    missing_seller_rows: int = 0
 
     @property
     def warning_count(self) -> int:
@@ -62,3 +71,5 @@ class MonthlyBSRResult:
     records: list[BSRRecord]
     stats: PipelineStats
     quality: DataQualityReport | None = None
+    # 每一组被合并的重复商品：保留谁、删掉谁、依据什么，供人工抽查。
+    dedupe_audit: list[dict[str, Any]] | None = None

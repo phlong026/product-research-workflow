@@ -34,3 +34,5 @@ class ResearchDossierInput:
     data_quality: list[dict[str, object]] = field(default_factory=list)
     missing_evidence: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    # 外部证据账本快照：{'evidence': [...], 'findings': [...], 'coverage': [...], 'sample_share': {...}}
+    external_evidence: dict[str, Any] | None = None

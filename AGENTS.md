@@ -44,6 +44,8 @@ RESEARCH_DB_PATH=runtime/api-experiment.db .venv/bin/python -m uvicorn research_
 .venv/bin/python -m pytest tests/test_setup_mcp.py -q
 ```
 
+指标口径见 `docs/METRIC_DEFINITIONS.md`；多人工作台见 `docs/WORKBENCH.md`；验收方案见 `docs/ACCEPTANCE_PLAN.md`。
+
 真实 MCP 数据源联调(SellerSprite/SIF/西柚/Apify)见 `docs/local/MCP_MAC_SETUP.md`;未配置密钥时所有离线测试照常可跑。
 
 ## 架构地图(src/research_workflow/)
@@ -65,7 +67,14 @@ RESEARCH_DB_PATH=runtime/api-experiment.db .venv/bin/python -m uvicorn research_
 | `competition/` | T08 | 集中度/BSR 累积层级/头腰尾带/虹吸信号 |
 | `new_products/` | T09 | launch success(连续达标)与 current survival 解耦,缺月=未知 |
 | `router/` | T10 | 规则化研究分支建议,人工 confirm 后生效 |
-| `dossier/` | T11 | JSON+CSV+Markdown+离线SVG HTML+SHA256 manifest |
+| `dossier/` | T11 | JSON+CSV+Markdown+离线SVG HTML+Excel 工作簿+SHA256 manifest |
+| `data/nodes.py` | 批次2 | 类目节点发现与多节点合并（字段别名待真实接口验证） |
+| `classification/llm.py` | 批次2 | Claude 分类 Provider（可选依赖 llm，密钥走环境变量） |
+| `process_tables.py` | 批次2 | 表1/2/3 导出与人工修改上传的校验 |
+| `evidence/` | 批次3 | 外部证据账本与槽位；结论必须引用证据且过决策边界 |
+| `new_products/selection.py` | 批次3 | 近 N 天新品筛选 |
+| `web/` | 批次4 | 多人 Web 工作台（见 `docs/WORKBENCH.md`） |
+| `reconcile.py` | 批次5 | 与人工结果逐项对账（见 `docs/ACCEPTANCE_PLAN.md`） |
 
 ## 代码约定
 

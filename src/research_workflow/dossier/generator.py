@@ -22,7 +22,8 @@ class ResearchDossierGenerator:
 
     def generate(self, dossier: ResearchDossierInput, output_dir: str | Path, *,
                  evidence_files: dict[str, Path] | None = None,
-                 approval_history: dict | None = None) -> Path:
+                 approval_history: dict | None = None,
+                 workbook_tables: dict[str, list[dict[str, Any]]] | None = None) -> Path:
         root = Path(output_dir)
         if root.is_symlink() or (root.exists() and (not root.is_dir() or any(root.iterdir()))):
             raise ValueError("导出目录必须为空或不存在;请使用新的版本目录保留旧研究资料包")
@@ -30,6 +31,10 @@ class ResearchDossierGenerator:
         staging = Path(tempfile.mkdtemp(prefix=".dossier-", dir=root.parent))
         try:
             self._generate_into(dossier, staging)
+            if workbook_tables is not None:
+                from .workbook import write_workbook
+
+                write_workbook(staging / "workbook.xlsx", dossier, workbook_tables)
             if evidence_files:
                 evidence_dir = staging / "evidence"
                 evidence_dir.mkdir()
@@ -129,6 +134,9 @@ class ResearchDossierGenerator:
                 csv_dir / "rank_bands.csv", dossier.competition_metrics.rank_bands
             )
             self._write_dataclass_csv(
+                csv_dir / "rank_points.csv", dossier.competition_metrics.rank_points
+            )
+            self._write_dataclass_csv(
                 csv_dir / "head_suction.csv", dossier.competition_metrics.head_suction
             )
         if dossier.new_product_analysis:
@@ -164,6 +172,39 @@ class ResearchDossierGenerator:
             writer = csv.DictWriter(handle, fieldnames=fields)
             writer.writeheader()
             writer.writerows({key: _csv_cell(value) for key, value in row.items()} for row in dict_rows)
+
+    @staticmethod
+    def _external_evidence_lines(dossier: ResearchDossierInput) -> list[str]:
+        ext = dossier.external_evidence
+        if not ext:
+            return ["未录入外部证据：市场规模与增速、TikTok 综合、竞争深研均未覆盖。"]
+        lines: list[str] = []
+        share = ext.get("sample_share") or {}
+        if share.get("share_pct") is not None:
+            lines.append(
+                f"- Top 样本销量约占美国市场（{share['period']} 年，外部证据 `{share['evidence_id']}`）"
+                f" {share['share_pct']:.2f}%；样本销量本身不等于美国整体市场规模。"
+            )
+        else:
+            lines.append(f"- Top 样本占美国市场比例：未知（{share.get('reason', '缺少外部市场规模证据')}）。"
+                         "样本销量不得当作美国整体市场规模。")
+        lines.extend(["", "### 证据覆盖", "", "| 模块 | 证据槽位 | 状态 | 条数 | 来源提示 |", "|---|---|---|---:|---|"])
+        for row in ext.get("coverage", []):
+            status = "已覆盖" if row["status"] == "covered" else "**未覆盖**"
+            lines.append(f"| {row['module']} | {row['title']} | {status} | {row['evidence_count']} | {row['provider_hint']} |")
+        findings = ext.get("findings", [])
+        if findings:
+            lines.extend(["", "### 深挖结论（每条均引用证据）", ""])
+            for f in findings:
+                lines.append(f"- [{f['module']}] {f['text']}（证据：`{', '.join(f['evidence_ids'])}`）")
+        evidence = ext.get("evidence", [])
+        if evidence:
+            lines.extend(["", "### 证据明细", "", "| ID | 槽位 | 内容 | 数值 | 周期 | 来源 | 可信度 |", "|---|---|---|---|---|---|---|"])
+            for e in evidence:
+                value = "" if e["value"] is None else f"{e['value']} {e['unit'] or ''}".strip()
+                source = e["source_url"] or f"文件 sha256:{(e['source_sha256'] or '')[:12]}"
+                lines.append(f"| `{e['evidence_id']}` | {e['slot']} | {e['claim']} | {value} | {e['period'] or ''} | {e['source_name']} {source} | {e['confidence']} |")
+        return lines
 
     def _markdown(self, dossier: ResearchDossierInput) -> str:
         market = sorted(dossier.market_metrics.market, key=lambda row: row.month)
@@ -275,10 +316,19 @@ class ResearchDossierGenerator:
                 [
                     f"- {latest_c.month} Top3 ASIN 销量占比：{latest_c.top3_asin_share_pct:.2f}%",
                     f"- {latest_c.month} Top10 ASIN 销量占比：{latest_c.top10_asin_share_pct:.2f}%",
-                    f"- {latest_c.month} Top3 品牌销量占比：{latest_c.top3_brand_share_pct:.2f}%",
+                    f"- {latest_c.month} Top3 品牌销量占比：{latest_c.top3_brand_share_pct:.2f}%（品牌信息覆盖 {latest_c.brand_coverage_pct:.0f}%）",
                     f"- {latest_c.month} Top10 品牌销量占比：{latest_c.top10_brand_share_pct:.2f}%",
+                    f"- {latest_c.month} Top3 卖家销量占比：{_fmt_rate(latest_c.top3_seller_share_pct)}（卖家信息覆盖 {latest_c.seller_coverage_pct:.0f}%；ASIN/品牌/卖家三者口径不同，互不替代）",
+                    f"- {latest_c.month} Top10 卖家销量占比：{_fmt_rate(latest_c.top10_seller_share_pct)}",
                 ]
             )
+            latest_points = [x for x in dossier.competition_metrics.rank_points if x.month == latest_c.month]
+            if latest_points:
+                lines.extend(["", "### 逐名次销量（单个名次自身，非累计）", "",
+                              "| 名次 | ASIN | 销量 | 份额 | 同比 |", "|---|---|---:|---:|---:|"])
+                for pt in latest_points:
+                    sales = "未知" if pt.sales is None else f"{pt.sales:,}"
+                    lines.append(f"| 第{pt.rank}名 | {pt.asin or '-'} | {sales} | {_fmt_rate(pt.sales_share_pct)} | {_fmt_pct(pt.yoy_pct)} |")
             latest_bands = [x for x in dossier.competition_metrics.rank_bands if x.month == latest_c.month]
             if latest_bands:
                 lines.append("")
@@ -301,6 +351,8 @@ class ResearchDossierGenerator:
                     f"- 当前仍满足存活阈值：{s.surviving_successful_products}",
                     f"- 已成功新品当期观测覆盖率：{_fmt_pct(s.current_observation_coverage_pct)}；未观测 {s.unknown_successful_products} 个",
                     f"- 已观测成功新品存活率：{_fmt_pct(s.survival_rate_among_successful_pct)}（分母仅含已观测成功新品）",
+                    f"- 新品留存率：{_fmt_rate(s.retention_rate_pct)}（分母=全部有效新品 {s.total_products}；当期未观测 {s.retention_unknown_products} 个，上界 {_fmt_rate(s.retention_rate_upper_pct)}）",
+                    f"- 新品推广率：{_fmt_rate(s.promotion_rate_pct)}（分母=全部有效新品；窗口数据不全无法判定 {s.promotion_unknown_products} 个，上界 {_fmt_rate(s.promotion_rate_upper_pct)}；未设推广阈值则为未计算）",
                     f"- 成功新品中早期达到阈值占比：{s.early_threshold_share_among_successful_pct:.2f}%",
                 ]
             )
@@ -320,7 +372,10 @@ class ResearchDossierGenerator:
         else:
             lines.append("未生成后续研究路线。")
 
-        lines.extend(["", "## 7. 原始资料索引", ""])
+        lines.extend(["", "## 7. 外部证据与深挖结论", ""])
+        lines.extend(self._external_evidence_lines(dossier))
+
+        lines.extend(["", "## 8. 原始资料索引", ""])
         if dossier.source_artifacts:
             lines.extend(
                 [
@@ -422,6 +477,11 @@ main {{ max-width: 1180px; margin: 0 auto; padding: 32px 20px 56px; }}
 
 def _fmt_pct(value: float | None) -> str:
     return "-" if value is None else f"{value:+.2f}%"
+
+
+def _fmt_rate(value: float | None) -> str:
+    """占比/比率（非变化量）：无正号；缺失显示“未知”，不显示为 0。"""
+    return "未知" if value is None else f"{value:.2f}%"
 
 
 def _fmt_pp(value: float | None) -> str:
