@@ -20,8 +20,12 @@
   const ROLE_NAMES = { owner: "所有者", editor: "编辑者", viewer: "只读", admin: "管理员", researcher: "研究员" };
   const COMMAND_NAMES = {
     ingest: "数据导入", "discover-nodes": "节点发现", classify: "分类", analyze: "分析",
-    resolve: "检查点裁决", dossier: "生成资料包",
+    resolve: "检查点裁决", dossier: "生成资料包", "export-table": "导出表格", "import-table": "导入修改后的表",
   };
+  const TABLE_NAMES = { 1: "表1 · 月度清洗数据", 2: "表2 · 唯一 ASIN 的地区/卖点", 3: "表3 · 分类结果" };
+  const STATUS_NAMES = { queued: "排队中", running: "运行中", succeeded: "成功", failed: "失败" };
+  const PAIR_RE = /^\d{4}-\d{2}:\d{4}-\d{2}$/;
+  const PERIOD_RE = /^\d{4}-\d{2}:\d{4}-\d{2}:\d{4}-\d{2}:\d{4}-\d{2}$/;
   const STEPS = [
     { key: "ingest", name: "数据导入", checkpoint: false },
     { key: "data_review", name: "数据检查点", checkpoint: true },
@@ -70,7 +74,7 @@
     const o = opts || {};
     return h("button", {
       type: o.type || "button",
-      class: "btn" + (o.kind ? " btn-" + o.kind : ""),
+      class: "btn" + (o.kind ? " " + o.kind.split(" ").map((k) => "btn-" + k).join(" ") : ""),
       "data-write": o.write ? "1" : null,
       disabled: !!o.disabled,
       onclick: o.onclick,
@@ -336,12 +340,12 @@
     if (token !== routeToken) return;
     const els = {
       stepper: h("div"), jobbar: h("section", { class: "card", "aria-label": "作业状态" }),
-      msg: h("div"), main: h("div"), aside: h("aside"),
+      msg: h("div"), main: h("div"), history: h("div"), aside: h("aside"),
     };
-    wb = { pid, token, detail, els, canWrite: detail.role !== "viewer", busy: false, timer: null, jobId: null };
+    wb = { pid, token, detail, els, jobs: jobs.jobs, canWrite: detail.role !== "viewer", busy: false, timer: null, jobId: null };
     const heading = page(detail.project.product + " · " + detail.project.marketplace,
       els.stepper, els.jobbar, els.msg,
-      h("div", { class: "two-col" }, els.main, els.aside));
+      h("div", { class: "two-col" }, h("div", null, els.main, els.history), els.aside));
     heading.focus();
     renderAll();
     const latest = jobs.jobs[0];
@@ -353,7 +357,10 @@
   async function reloadProject(flash) {
     const mine = wb;
     try {
-      mine.detail = await api("GET", "/api/projects/" + encodeURIComponent(mine.pid));
+      const base = "/api/projects/" + encodeURIComponent(mine.pid);
+      const [detail, jobs] = await Promise.all([api("GET", base), api("GET", base + "/jobs")]);
+      mine.detail = detail;
+      mine.jobs = jobs.jobs;
     } catch (err) {
       if (wb === mine) setNotice(mine.els.msg, "danger", err.message);
       return;
@@ -382,6 +389,7 @@
         "aria-current": i === current ? "step" : null,
       }, h("span", { class: "num" }, "步骤 " + (i + 1)), h("span", { class: "name" }, step.name), h("span", { class: "kind" }, step.checkpoint ? "人工检查点" : "自动步骤")))));
     renderMain();
+    renderHistory();
     renderAside();
     applyBusy();
   }
@@ -404,6 +412,8 @@
       slot.append(canWrite ? ingestPanel() : readonlyStep("数据导入"));
     } else if (detail.next === "classify") {
       slot.append(canWrite ? classifyPanel() : readonlyStep("分类"));
+      const tables = tablesBlock([2]);
+      if (tables) slot.append(h("section", { class: "card" }, tables));
     } else if (detail.next === "analyze") {
       slot.append(canWrite ? analyzePanel() : readonlyStep("分析"));
     } else {
@@ -434,31 +444,64 @@
       : h("p", { class: "muted" }, "暂无工件");
     els.aside.replaceChildren(info,
       h("section", { class: "card", "aria-labelledby": "art-title" }, h("h2", { id: "art-title" }, "已生成工件"), artifacts),
-      detail.role === "owner" ? membersCard() : null);
+      membersCard());
   }
 
   function membersCard() {
+    const isOwner = wb.detail.role === "owner";
+    const pid = wb.pid;
     const msg = h("div");
-    const name = h("input", { type: "text", required: true, maxlength: "64", autocomplete: "off" });
-    const role = h("select", null, h("option", { value: "editor" }, "编辑者(可执行)"), h("option", { value: "viewer" }, "只读"));
-    const submit = button("添加成员", { type: "submit", kind: "primary" });
-    const form = h("form", {
-      onsubmit: async (event) => {
-        event.preventDefault();
-        submit.disabled = true;
-        try {
-          const out = await api("POST", "/api/projects/" + encodeURIComponent(wb.pid) + "/members",
-            { json: { username: name.value.trim(), role: role.value } });
-          setNotice(msg, "ok", "已将 " + out.username + " 设为" + roleName(out.role));
-          name.value = "";
-        } catch (err) {
-          setNotice(msg, "danger", err.message);
-        } finally {
-          submit.disabled = false;
-        }
-      },
-    }, field("用户名", name, "须为已存在的账号"), field("角色", role), msg, submit);
-    return h("section", { class: "card", "aria-labelledby": "member-title" }, h("h2", { id: "member-title" }, "项目成员"), form);
+    const list = h("div", null, h("p", { class: "muted" }, "加载成员名单…"));
+    const loadMembers = async () => {
+      const mine = wb;
+      try {
+        const data = await api("GET", "/api/projects/" + encodeURIComponent(pid) + "/members");
+        if (wb !== mine) return;
+        list.replaceChildren(h("ul", { class: "member-list" }, data.members.map((m) => h("li", null,
+          h("strong", null, m.username), badge(roleName(m.role), m.role === "owner" ? "accent" : null),
+          isOwner && m.role !== "owner"
+            ? button("移除", { kind: "small danger", onclick: () => removeMember(m.username) })
+            : null))));
+      } catch (err) {
+        if (wb === mine) list.replaceChildren(notice("danger", "读取成员名单失败", err.message));
+      }
+    };
+    const removeMember = async (username) => {
+      if (!window.confirm("确定移除成员 " + username + " 吗?他将无法再访问此项目。")) return;
+      try {
+        await api("DELETE", "/api/projects/" + encodeURIComponent(pid) + "/members/" + encodeURIComponent(username));
+        setNotice(msg, "ok", "已移除 " + username);
+        await loadMembers();
+      } catch (err) {
+        setNotice(msg, "danger", err.message);
+      }
+    };
+    loadMembers();
+    let form = null;
+    if (isOwner) {
+      const name = h("input", { type: "text", required: true, maxlength: "64", autocomplete: "off" });
+      const role = h("select", null, h("option", { value: "editor" }, "编辑者(可执行)"), h("option", { value: "viewer" }, "只读"));
+      const submit = button("添加成员", { type: "submit", kind: "primary" });
+      form = h("form", {
+        onsubmit: async (event) => {
+          event.preventDefault();
+          submit.disabled = true;
+          try {
+            const out = await api("POST", "/api/projects/" + encodeURIComponent(pid) + "/members",
+              { json: { username: name.value.trim(), role: role.value } });
+            setNotice(msg, "ok", "已将 " + out.username + " 设为" + roleName(out.role));
+            name.value = "";
+            await loadMembers();
+          } catch (err) {
+            setNotice(msg, "danger", err.message);
+          } finally {
+            submit.disabled = false;
+          }
+        },
+      }, field("用户名", name, "须为已存在的账号"), field("角色", role), submit);
+    }
+    return h("section", { class: "card", "aria-labelledby": "member-title" },
+      h("h2", { id: "member-title" }, "项目成员"), list, msg, form);
   }
 
   // ---------------------------------------------------------------- 作业
@@ -509,6 +552,7 @@
   function jobTitle(job) {
     let title = COMMAND_NAMES[job.command] || job.command;
     if (job.command === "resolve") title += job.params && job.params.approve ? "(确认)" : "(驳回)";
+    if ((job.command === "export-table" || job.command === "import-table") && job.params) title += "(表" + job.params.table + ")";
     return title;
   }
 
@@ -571,12 +615,88 @@
         mine.timer = setTimeout(poll, POLL_MS);
       } else if (job.status === "succeeded") {
         showIdle(job);
-        await reloadProject("「" + jobTitle(job) + "」已完成。");
+        await reloadProject(job.command === "import-table"
+          ? "表" + job.params.table + " 已导入并通过校验。旧审批已失效,请在当前检查点重新人工确认;系统不会自动批准。"
+          : "「" + jobTitle(job) + "」已完成。");
       } else {
         showJob(job);
+        refreshJobs();
       }
     };
     poll();
+  }
+
+  async function refreshJobs() {
+    const mine = wb;
+    try {
+      const data = await api("GET", "/api/projects/" + encodeURIComponent(mine.pid) + "/jobs");
+      if (wb !== mine) return;
+      mine.jobs = data.jobs;
+      renderHistory();
+    } catch (err) {
+      // 作业历史只是辅助信息,读取失败不打断主流程
+    }
+  }
+
+  function renderHistory() {
+    const jobs = (wb.jobs || []).slice(0, 20);
+    const body = jobs.length
+      ? h("div", { class: "table-wrap" }, h("table", null,
+        h("thead", null, h("tr", null, ["时间", "作业", "状态", "尝试", "错误"].map((t) => h("th", null, t)))),
+        h("tbody", null, jobs.map((job) => h("tr", null,
+          h("td", { class: "mono-cell" }, formatTime(job.created_at)), h("td", null, jobTitle(job)),
+          h("td", null, badge(STATUS_NAMES[job.status] || job.status,
+            job.status === "failed" ? "danger" : job.status === "succeeded" ? "ok" : "accent")),
+          h("td", { class: "num" }, job.attempts),
+          h("td", { class: "small" }, job.error ? String(job.error).slice(0, 160) : "-"))))))
+      : h("p", { class: "muted" }, "还没有作业记录。");
+    wb.els.history.replaceChildren(h("section", { class: "card", "aria-labelledby": "history-title" },
+      h("h2", { id: "history-title" }, "作业历史"), body));
+  }
+
+  function exportedTables() {
+    const found = new Set();
+    for (const job of wb.jobs || []) {
+      if (job.command === "export-table" && job.status === "succeeded" && job.params) found.add(job.params.table);
+    }
+    return found;
+  }
+
+  // 导出/回传人工修改的表。回传成功后旧审批立即失效;这里不做任何批准动作。
+  function tablesBlock(tables) {
+    const exported = exportedTables();
+    const rows = tables.map((n) => {
+      const msg = h("div");
+      const link = exported.has(n)
+        ? h("a", { class: "btn btn-small", download: "",
+          href: "/api/projects/" + encodeURIComponent(wb.pid) + "/exports/table" + n + ".csv" }, "下载已导出的 CSV")
+        : null;
+      if (!wb.canWrite) return link ? h("div", { class: "table-io-row" }, h("strong", null, TABLE_NAMES[n]), link) : null;
+      const upload = fileInput(false);
+      const send = button("上传修改后的表", { write: true, onclick: async () => {
+        const mine = wb;
+        if (!upload.files.length) { setNotice(msg, "danger", "请先选择修改后的表格文件"); return; }
+        setNotice(msg, "", "");
+        setBusy(true);
+        try {
+          const id = await uploadFile(upload.files[0]);
+          if (wb !== mine) return;
+          await startJob("import-table", { table: n, upload: id });
+        } catch (err) {
+          if (wb === mine) { setNotice(msg, "danger", err.message); setBusy(false); }
+        }
+      } });
+      return h("div", { class: "table-io-row" }, h("strong", null, TABLE_NAMES[n]),
+        h("div", { class: "row-actions" },
+          button("导出此表(CSV)", { write: true, onclick: () => startJob("export-table", { table: n }) }), link),
+        field("修改后的表(csv / xlsx)", upload),
+        h("div", { class: "row-actions" }, send), msg);
+    }).filter(Boolean);
+    if (!rows.length) return null;
+    return h("section", { class: "table-io" }, h("h3", null, "导出 / 回传人工修改的表(可选)"),
+      notice("warn", "修改并上传后旧审批立即失效,需重新人工确认",
+        "先导出 CSV,在表格软件中修改,再上传。系统会先校验,校验失败不改变任何状态并如实显示原因;上传成功也不会自动批准。"),
+      rows);
   }
 
   // ---------------------------------------------------------------- 上传
@@ -794,6 +914,8 @@
     const promotion = h("input", { type: "number", min: "0" });
     const retention = h("input", { type: "number", min: "0" });
     const study = h("input", { type: "text", placeholder: "YYYY-MM", maxlength: "7" });
+    const pairs = h("textarea", { placeholder: "2025-01:2026-01" });
+    const periods = h("textarea", { placeholder: "2025-01:2025-03:2026-01:2026-03" });
     const submit = button("开始分析", { kind: "primary", write: true, onclick: async () => {
       const mine = wb;
       try {
@@ -810,6 +932,16 @@
         const studyMonth = study.value.trim();
         if (studyMonth && !MONTH_RE.test(studyMonth)) throw new Error("研究月格式应为 YYYY-MM");
         if (studyMonth) params.study_month = studyMonth;
+        const lines = (box) => box.value.split("\n").map((l) => l.trim()).filter(Boolean);
+        const pairList = lines(pairs);
+        const periodList = lines(periods);
+        if (pairList.length > 20 || periodList.length > 20) throw new Error("份额分解对和跨期比较各最多 20 条");
+        const badPair = pairList.find((x) => !PAIR_RE.test(x));
+        if (badPair) throw new Error("份额分解对格式应为 YYYY-MM:YYYY-MM,不合法:" + badPair);
+        const badPeriod = periodList.find((x) => !PERIOD_RE.test(x));
+        if (badPeriod) throw new Error("跨期比较格式应为 a起点:a终点:b起点:b终点(均为 YYYY-MM),不合法:" + badPeriod);
+        if (pairList.length) params.pairs = pairList;
+        if (periodList.length) params.periods = periodList;
         setNotice(msg, "", "");
         setBusy(true);
         if (newProducts.files.length) {
@@ -829,6 +961,9 @@
         field("销量阈值", sales), field("连续达标月数", consecutive), field("早期窗口(月)", early),
         field("存活阈值(可选)", survival), field("晋升阈值(可选)", promotion), field("留存阈值(可选)", retention),
         field("研究月(可选)", study, "默认取数据中最新月份")),
+      h("div", { class: "grid" },
+        field("份额分解对(可选,每行一对)", pairs, "格式 YYYY-MM:YYYY-MM,基期:现期"),
+        field("跨期比较(可选,每行一组)", periods, "格式 a起点:a终点:b起点:b终点,均为 YYYY-MM")),
       msg, submit);
   }
 
@@ -892,7 +1027,7 @@
     const warnBlock = warnTotal > 0 ? notice("warn", "数据质量警告共 " + warnTotal + " 条", "请在上表标黄的月份逐项核对。") : null;
     return h("section", { class: "card", "aria-labelledby": "dr-title" },
       checkpointHeader(cp, "步骤 2 · 数据检查点", "dr-title"),
-      missingBlock, warnBlock, monthTable, sources, msg,
+      missingBlock, warnBlock, monthTable, sources, tablesBlock([1]), msg,
       resolveButtons(cp, null, () => {
         if (missing.length && !ack.checked) {
           setNotice(msg, "danger", "存在缺月:请先勾选「我已知悉缺月」后再确认,或驳回并补充数据。");
@@ -1009,7 +1144,7 @@
       enrichmentBlock(p.enrichment), unresolved,
       h("div", { class: "table-tools" }, field("筛选", search),
         h("label", { class: "inline" }, onlyNeeds, "只看待人工/未归类(" + (needs.size + unclassified.size) + ")")),
-      table, pager, actions);
+      table, pager, tablesBlock([3, 2]), actions);
     refreshUnresolved();
     renderRows();
     const mine = wb;

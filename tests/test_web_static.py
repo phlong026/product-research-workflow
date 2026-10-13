@@ -79,3 +79,14 @@ def test_frontend_states_human_decision_boundary_and_never_auto_approves() -> No
     for match in re.finditer(r"approve:\s*([^,}\s]+)", js):
         assert match.group(1) in {"true", "false"}, f"approve 不得由变量决定: {match.group(0)}"
     assert js.count('startJob("resolve"') == 2  # 仅「确认」「驳回」两个按钮
+
+
+def test_table_import_export_entry_never_approves_and_warns_about_invalidation() -> None:
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "修改并上传后旧审批立即失效,需重新人工确认" in js
+    assert 'startJob("export-table"' in js and 'startJob("import-table"' in js
+    # 回传表只提交 import-table;批准动作仍只有 resolve 的两处按钮
+    assert js.count('startJob("resolve"') == 2
+    assert "approve" not in re.search(r'startJob\("import-table".*', js).group(0)
+    for table in ("[1]", "[3, 2]", "[2]"):
+        assert f"tablesBlock({table})" in js
