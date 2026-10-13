@@ -273,8 +273,9 @@ def create_app(
             else:
                 (d / "exports").mkdir(exist_ok=True)
                 fmt = params.get("format", "xlsx")
-                tag = f"table{params.get('table')}" if command == "table-export" else "new_products"
-                output = str(d / "exports" / f"{tag}-{job_id[:8]}.{'csv' if command == 'new-products-select' else fmt}")
+                tag = {"table-export": f"table{params.get('table')}", "reconcile": "reconcile"}.get(command, "new_products")
+                ext = "csv" if command in {"new-products-select", "reconcile"} else fmt
+                output = str(d / "exports" / f"{tag}-{job_id[:8]}.{ext}")
         forced = {"added_by": user["name"]} if command == "evidence-add" else None
         try:
             argv = build_argv(spec, params, resolve_file=resolver(project_id), output_path=output,

@@ -77,6 +77,7 @@ SPECS: dict[str, CommandSpec] = {s.name: s for s in [
         Arg("confidence", "enum", choices=("high", "medium", "low")))),
     CommandSpec("finding-add", (Arg("module", "ident", required=True), Arg("text", "str", required=True),
                                 Arg("evidence", "list", required=True))),
+    CommandSpec("reconcile", (Arg("reference", "file", required=True),), needs="viewer", server_output="output"),
     CommandSpec("dossier", (), server_output="output"),
 ]}
 
