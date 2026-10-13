@@ -99,8 +99,13 @@ class ClassificationService:
             if asin not in unique:
                 continue
             label = str(raw.get("label", schema.unknown_label)).strip()
+            needs_review = bool(raw.get("needs_review", False))
+            review_reason = str(raw.get("review_reason", "")).strip()
             if label not in schema.allowed_labels:
+                # Never invent a class: an out-of-schema label goes to a human.
                 label = schema.unknown_label
+                needs_review = True
+                review_reason = review_reason or "label not in schema"
             confidence = str(raw.get("confidence", "medium")).lower()
             if confidence not in {"high", "medium", "low"}:
                 confidence = "medium"
@@ -110,6 +115,9 @@ class ClassificationService:
                 confidence=confidence,
                 rationale=str(raw.get("rationale", "")).strip(),
                 source=self.provider.name,
+                evidence=str(raw.get("evidence", "")).strip(),
+                needs_review=needs_review,
+                review_reason=review_reason,
             )
 
         # Every requested ASIN must be represented so nothing silently disappears.
@@ -122,6 +130,8 @@ class ClassificationService:
                     confidence="low",
                     rationale="provider returned no classification",
                     source=self.provider.name,
+                    needs_review=True,
+                    review_reason="provider returned no classification",
                 ),
             )
 
@@ -188,12 +198,7 @@ def _version(schema: ClassificationSchema, rows: dict[str, ProductClassification
     payload = {
         "schema_hash": schema.schema_hash,
         "rows": {
-            asin: {
-                "label": row.label,
-                "confidence": row.confidence,
-                "source": row.source,
-            }
-            for asin, row in sorted(rows.items())
+            asin: _row_fingerprint(row) for asin, row in sorted(rows.items())
         },
     }
     digest = sha256(
@@ -202,3 +207,16 @@ def _version(schema: ClassificationSchema, rows: dict[str, ProductClassification
         )
     ).hexdigest()[:12]
     return f"cls-{digest}"
+
+
+def _row_fingerprint(row: ProductClassification) -> dict[str, Any]:
+    fingerprint: dict[str, Any] = {
+        "label": row.label,
+        "confidence": row.confidence,
+        "source": row.source,
+    }
+    # Only present when set, so versions of batches without review flags stay unchanged.
+    # evidence/rationale are descriptive text and deliberately excluded from the version.
+    if row.needs_review:
+        fingerprint["needs_review"] = True
+    return fingerprint
