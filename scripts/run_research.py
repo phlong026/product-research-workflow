@@ -312,6 +312,7 @@ def _persist_ingest(
         quality[result.month] = {
             "stats": dataclasses.asdict(result.stats),
             "quality": dataclasses.asdict(result.quality),
+            "dedupe_audit": [entry.to_dict() for entry in result.dedupe_audit],
         }
         summary[result.month] = {
             "input_rows": result.stats.input_rows,
@@ -827,6 +828,12 @@ def cmd_dossier(args: argparse.Namespace) -> None:
     evidence_files = {name: pdir / name for name in evidence_names if (pdir / name).is_file()}
     evidence_files.update({source.sha256 + Path(source.source).suffix: (Path(source.source) if Path(source.source).is_absolute() else pdir / source.source) for source in sources})
     approval_history = {key: dataclasses.asdict(svc.store.get_checkpoint(value)) for key,value in approvals.items()}
+    classification_envelope = _load_json(pdir / "classification.json")
+    records_hash = _sha256_file(pdir / "records.json")
+    workbook_approvals = [
+        {"step": key, "checkpoint_id": item["id"], "status": item["status"]}
+        for key, item in sorted(approval_history.items())
+    ]
     ResearchDossierGenerator().generate(
         ResearchDossierInput(
             project_id=project.id,
@@ -837,7 +844,19 @@ def cmd_dossier(args: argparse.Namespace) -> None:
             competition_metrics=competition,
             new_product_analysis=new_products,
             route_plan=route_plan,
-            source_artifacts=[dataclasses.replace(source, source="evidence/" + source.sha256 + Path(source.source).suffix) for source in sources],
+            source_artifacts=[
+                dataclasses.replace(
+                    source,
+                    source="evidence/" + source.sha256 + Path(source.source).suffix,
+                    relative_path="evidence/" + source.sha256 + Path(source.source).suffix,
+                )
+                for source in sources
+            ],
+            records=_load_records(pdir),
+            classification=rebuild(ClassificationBatch, classification_envelope["batch"]),
+            data_version=f"records.json@{records_hash[:12]}",
+            data_hash=records_hash,
+            approval_history=workbook_approvals,
             data_quality=data_quality,
             missing_evidence=missing_evidence,
             metadata={**context, "approved_checkpoints": svc.store.get_state(args.project).get("approved_checkpoints", {})},

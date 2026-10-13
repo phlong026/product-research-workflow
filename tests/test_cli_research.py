@@ -144,6 +144,15 @@ def test_full_skill_workflow_with_checkpoints(cli: CLI, tmp_path: Path) -> None:
     files = set(out["files"])
     assert {"report.md", "dashboard.html", "data.json", "manifest.json", "csv/market.csv"} <= files
 
+    # 综合 Excel 工作簿:逐行数据与分类结果由 CLI 接线填入,而非「本次运行未提供」
+    assert "research_workbook.xlsx" in files
+    openpyxl = pytest.importorskip("openpyxl")
+    wb = openpyxl.load_workbook(dossier_dir / "research_workbook.xlsx")
+    assert wb["表1_清洗月度数据"]["A1"].value != "本次运行未提供"
+    assert wb["表3_分类结果"]["A1"].value != "本次运行未提供"
+    quality = json.loads((tmp_path / "projects" / project_id / "quality.json").read_text(encoding="utf-8"))
+    assert all("dedupe_audit" in item for item in quality.values())
+
     report = (dossier_dir / "report.md").read_text(encoding="utf-8")
     assert "人工最终判断" in report and "□ YES" in report
     assert "已人工确认" in report  # 路线确认状态进入报告

@@ -256,7 +256,7 @@ def _records_sheet(wb: Any, input: ResearchDossierInput) -> None:
         _Col("月销量", lambda r: r.monthly_sales, "int"),
         _Col("月份", lambda r: r.month),
         _Col("节点排名", lambda r: r.node_rank, "int"),
-        _Col("清洗后名次", lambda r: ranks[id(r)], "int"),
+        _Col("清洗后名次", lambda r: r.sales_rank if r.sales_rank is not None else ranks[id(r)], "int"),
         _Col("卖家所属地", lambda r: r.seller_region),
         _Col("上架日期", lambda r: r.launch_date),
         _Col("父ASIN", lambda r: r.parent_asin),
