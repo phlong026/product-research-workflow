@@ -22,7 +22,8 @@ class ResearchDossierGenerator:
 
     def generate(self, dossier: ResearchDossierInput, output_dir: str | Path, *,
                  evidence_files: dict[str, Path] | None = None,
-                 approval_history: dict | None = None) -> Path:
+                 approval_history: dict | None = None,
+                 workbook_tables: dict[str, list[dict[str, Any]]] | None = None) -> Path:
         root = Path(output_dir)
         if root.is_symlink() or (root.exists() and (not root.is_dir() or any(root.iterdir()))):
             raise ValueError("导出目录必须为空或不存在;请使用新的版本目录保留旧研究资料包")
@@ -30,6 +31,10 @@ class ResearchDossierGenerator:
         staging = Path(tempfile.mkdtemp(prefix=".dossier-", dir=root.parent))
         try:
             self._generate_into(dossier, staging)
+            if workbook_tables is not None:
+                from .workbook import write_workbook
+
+                write_workbook(staging / "workbook.xlsx", dossier, workbook_tables)
             if evidence_files:
                 evidence_dir = staging / "evidence"
                 evidence_dir.mkdir()
