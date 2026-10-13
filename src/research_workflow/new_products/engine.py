@@ -123,6 +123,10 @@ def analyze_new_products(
             if current_observed
             else None
         )
+        retained = (current_sales >= survival_threshold) if current_observed else None
+        promoted, promotion_month = _promotion_status(
+            sales_by_month, anchor_month, current_month, config
+        )
         latest = rows[-1]
         outcomes.append(
             NewProductOutcome(
@@ -140,6 +144,9 @@ def analyze_new_products(
                 seller_region=latest.seller_region,
                 account_type=latest.account_type,
                 segment=latest.segment,
+                retained=retained,
+                promoted=promoted,
+                promotion_month=promotion_month,
             )
         )
 
@@ -152,6 +159,12 @@ def analyze_new_products(
         if row.first_threshold_month_index is not None
         and 1 <= row.first_threshold_month_index <= config.early_threshold_window_months
     ]
+    total = len(outcomes)
+    retained_n = sum(1 for row in outcomes if row.retained is True)
+    retention_unknown = sum(1 for row in outcomes if row.retained is None)
+    promotion_enabled = config.promotion_threshold is not None
+    promoted_n = sum(1 for row in outcomes if row.promoted is True)
+    promotion_unknown = sum(1 for row in outcomes if row.promoted is None) if promotion_enabled else 0
     summary = NewProductSummary(
         total_products=len(outcomes),
         successful_products=len(successful),
@@ -164,6 +177,16 @@ def analyze_new_products(
         successful_with_early_threshold=len(early),
         early_threshold_share_among_successful_pct=_pct(len(early), len(successful)),
         current_month=current_month,
+        retained_products=retained_n,
+        retention_unknown_products=retention_unknown,
+        retention_rate_pct=_pct(retained_n, total) if total else None,
+        retention_rate_upper_pct=_pct(retained_n + retention_unknown, total) if total else None,
+        promoted_products=promoted_n,
+        promotion_unknown_products=promotion_unknown,
+        promotion_rate_pct=_pct(promoted_n, total) if promotion_enabled and total else None,
+        promotion_rate_upper_pct=(
+            _pct(promoted_n + promotion_unknown, total) if promotion_enabled and total else None
+        ),
     )
 
     account_types: list[AccountTypeMetric] = []
@@ -202,6 +225,26 @@ def analyze_new_products(
         segments=grouped_metrics("segment"),
         config=config,
     )
+
+
+def _promotion_status(
+    sales_by_month: dict[str, int],
+    anchor_month: str,
+    current_month: str | None,
+    config: NewProductConfig,
+) -> tuple[bool | None, str | None]:
+    """首 N 个月（含上架月）内是否推到推广阈值。缺月/窗口未走完且未达标 => 未知，不当作失败。"""
+    if config.promotion_threshold is None:
+        return None, None
+    start = _month_ordinal(anchor_month)
+    window = range(start, start + config.promotion_window_months)
+    observed = {_month_ordinal(m): v for m, v in sales_by_month.items()}
+    for ordinal in window:
+        if ordinal in observed and observed[ordinal] >= config.promotion_threshold:
+            return True, f"{ordinal // 12:04d}-{ordinal % 12 + 1:02d}"
+    window_closed = current_month is not None and _month_ordinal(current_month) >= window[-1]
+    all_observed = all(ordinal in observed for ordinal in window)
+    return (False, None) if window_closed and all_observed else (None, None)
 
 
 def _find_success_month(

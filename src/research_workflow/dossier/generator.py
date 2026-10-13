@@ -129,6 +129,9 @@ class ResearchDossierGenerator:
                 csv_dir / "rank_bands.csv", dossier.competition_metrics.rank_bands
             )
             self._write_dataclass_csv(
+                csv_dir / "rank_points.csv", dossier.competition_metrics.rank_points
+            )
+            self._write_dataclass_csv(
                 csv_dir / "head_suction.csv", dossier.competition_metrics.head_suction
             )
         if dossier.new_product_analysis:
@@ -275,10 +278,19 @@ class ResearchDossierGenerator:
                 [
                     f"- {latest_c.month} Top3 ASIN 销量占比：{latest_c.top3_asin_share_pct:.2f}%",
                     f"- {latest_c.month} Top10 ASIN 销量占比：{latest_c.top10_asin_share_pct:.2f}%",
-                    f"- {latest_c.month} Top3 品牌销量占比：{latest_c.top3_brand_share_pct:.2f}%",
+                    f"- {latest_c.month} Top3 品牌销量占比：{latest_c.top3_brand_share_pct:.2f}%（品牌信息覆盖 {latest_c.brand_coverage_pct:.0f}%）",
                     f"- {latest_c.month} Top10 品牌销量占比：{latest_c.top10_brand_share_pct:.2f}%",
+                    f"- {latest_c.month} Top3 卖家销量占比：{_fmt_rate(latest_c.top3_seller_share_pct)}（卖家信息覆盖 {latest_c.seller_coverage_pct:.0f}%；ASIN/品牌/卖家三者口径不同，互不替代）",
+                    f"- {latest_c.month} Top10 卖家销量占比：{_fmt_rate(latest_c.top10_seller_share_pct)}",
                 ]
             )
+            latest_points = [x for x in dossier.competition_metrics.rank_points if x.month == latest_c.month]
+            if latest_points:
+                lines.extend(["", "### 逐名次销量（单个名次自身，非累计）", "",
+                              "| 名次 | ASIN | 销量 | 份额 | 同比 |", "|---|---|---:|---:|---:|"])
+                for pt in latest_points:
+                    sales = "未知" if pt.sales is None else f"{pt.sales:,}"
+                    lines.append(f"| 第{pt.rank}名 | {pt.asin or '-'} | {sales} | {_fmt_rate(pt.sales_share_pct)} | {_fmt_pct(pt.yoy_pct)} |")
             latest_bands = [x for x in dossier.competition_metrics.rank_bands if x.month == latest_c.month]
             if latest_bands:
                 lines.append("")
@@ -301,6 +313,8 @@ class ResearchDossierGenerator:
                     f"- 当前仍满足存活阈值：{s.surviving_successful_products}",
                     f"- 已成功新品当期观测覆盖率：{_fmt_pct(s.current_observation_coverage_pct)}；未观测 {s.unknown_successful_products} 个",
                     f"- 已观测成功新品存活率：{_fmt_pct(s.survival_rate_among_successful_pct)}（分母仅含已观测成功新品）",
+                    f"- 新品留存率：{_fmt_rate(s.retention_rate_pct)}（分母=全部有效新品 {s.total_products}；当期未观测 {s.retention_unknown_products} 个，上界 {_fmt_rate(s.retention_rate_upper_pct)}）",
+                    f"- 新品推广率：{_fmt_rate(s.promotion_rate_pct)}（分母=全部有效新品；窗口数据不全无法判定 {s.promotion_unknown_products} 个，上界 {_fmt_rate(s.promotion_rate_upper_pct)}；未设推广阈值则为未计算）",
                     f"- 成功新品中早期达到阈值占比：{s.early_threshold_share_among_successful_pct:.2f}%",
                 ]
             )
@@ -422,6 +436,11 @@ main {{ max-width: 1180px; margin: 0 auto; padding: 32px 20px 56px; }}
 
 def _fmt_pct(value: float | None) -> str:
     return "-" if value is None else f"{value:+.2f}%"
+
+
+def _fmt_rate(value: float | None) -> str:
+    """占比/比率（非变化量）：无正号；缺失显示“未知”，不显示为 0。"""
+    return "未知" if value is None else f"{value:.2f}%"
 
 
 def _fmt_pp(value: float | None) -> str:

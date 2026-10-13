@@ -20,6 +20,9 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "node_rank": ("节点排名", "小类BSR", "BSR", "rank", "node_rank"),
     "launch_date": ("上架时间", "上架日期", "launch_date", "launchDate"),
     "image_url": ("商品主图", "图片URL", "image", "image_url"),
+    "seller": ("卖家", "卖家名称", "店铺", "seller", "seller_name", "sellerName", "merchant"),
+    "rating": ("评分", "星级", "rating", "stars", "ratings_avg"),
+    "rating_count": ("评分数", "评分数量", "评论数", "ratings", "rating_count", "ratingCount", "reviews"),
 }
 
 
@@ -28,7 +31,10 @@ class MonthlyBSRConfig:
     top_n: int = 100
     merge_cn_hk: bool = True
     dedupe_parent: bool = True
-    dedupe_exact_title: bool = True
+    # 跨父体去重口径：销量、评分、评分数三者完全相同（且评分数>0）视为同一商品。
+    dedupe_by_metrics: bool = True
+    # 旧口径（品牌+规范化标题）可能误删/漏删，默认关闭，仅作显式选项保留。
+    dedupe_exact_title: bool = False
 
 
 def _first(row: dict[str, Any], names: tuple[str, ...], default: Any = "") -> Any:
@@ -62,6 +68,16 @@ def normalize_seller_region(value: Any, *, merge_cn_hk: bool = True) -> str:
     return raw
 
 
+def _to_float(value: Any) -> float | None:
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        number = float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
 def _normal_title(value: str) -> str:
     text = unicodedata.normalize("NFKC", value).casefold().strip()
     text = re.sub(r"\s+", " ", text)
@@ -92,6 +108,9 @@ def parse_bsr_row(row: dict[str, Any], month: str, *, merge_cn_hk: bool = True) 
         node_rank=rank,
         launch_date=str(_first(row, ALIASES["launch_date"], "")).strip() or None,
         image_url=str(_first(row, ALIASES["image_url"], "")).strip() or None,
+        seller=str(_first(row, ALIASES["seller"], "")).strip(),
+        rating=_to_float(_first(row, ALIASES["rating"], None)),
+        rating_count=_to_int(_first(row, ALIASES["rating_count"], None), None),
         source_row=row,
     )
 
@@ -120,6 +139,42 @@ def _dedupe(records: list[BSRRecord], key_fn) -> list[BSRRecord]:
     return [chosen[k] for k in order]
 
 
+def _dedupe_by_metrics(
+    records: list[BSRRecord],
+) -> tuple[list[BSRRecord], list[dict[str, Any]], int]:
+    """跨父体去重：销量、评分、评分数三者相同视为同一商品的重复上架。
+
+    评分或评分数缺失、或评分数为 0 的行无法可靠判重：原样保留并计入 unjudgeable。
+    """
+    groups: dict[tuple[int, float, int], list[BSRRecord]] = {}
+    unjudgeable = 0
+    for record in records:
+        if record.rating is None or not record.rating_count:
+            unjudgeable += 1
+            continue
+        groups.setdefault((record.monthly_sales, record.rating, record.rating_count), []).append(record)
+    drop: set[int] = set()
+    audit: list[dict[str, Any]] = []
+    for key, members in groups.items():
+        if len(members) < 2:
+            continue
+        keep = members[0]
+        for member in members[1:]:
+            keep = _prefer(keep, member)
+        removed = [m for m in members if m is not keep]
+        drop.update(id(m) for m in removed)
+        audit.append({
+            "rule": "same_sales_rating_rating_count",
+            "monthly_sales": key[0],
+            "rating": key[1],
+            "rating_count": key[2],
+            "kept_asin": keep.asin,
+            "removed_asins": sorted(m.asin for m in removed),
+        })
+    audit.sort(key=lambda a: (a["kept_asin"], a["removed_asins"]))
+    return [r for r in records if id(r) not in drop], audit, unjudgeable
+
+
 def build_monthly_top(
     rows: Iterable[dict[str, Any]],
     month: str,
@@ -142,10 +197,16 @@ def build_monthly_top(
     if config.dedupe_parent:
         parent_rows = _dedupe(parsed, lambda r: f"parent:{r.parent_asin}" if r.parent_asin else f"asin:{r.asin}")
 
-    suspicious_rows = parent_rows
+    metric_rows = parent_rows
+    dedupe_audit: list[dict[str, Any]] = []
+    unjudgeable = 0
+    if config.dedupe_by_metrics:
+        metric_rows, dedupe_audit, unjudgeable = _dedupe_by_metrics(parent_rows)
+
+    suspicious_rows = metric_rows
     if config.dedupe_exact_title:
         suspicious_rows = _dedupe(
-            parent_rows,
+            metric_rows,
             lambda r: (
                 f"title:{r.brand.lower().strip()}::{_normal_title(r.title)}"
                 if _normal_title(r.title)
@@ -167,6 +228,7 @@ def build_monthly_top(
             parent_deduped_rows=len(parent_rows),
             suspicious_deduped_rows=len(suspicious_rows),
             output_rows=len(output),
+            metric_deduped_rows=len(metric_rows) if config.dedupe_by_metrics else None,
         ),
         quality=DataQualityReport(
             missing_asin_rows=missing_asin_rows,
@@ -176,8 +238,12 @@ def build_monthly_top(
             unknown_seller_region_rows=sum(1 for r in parsed if r.seller_region == "UNKNOWN"),
             missing_rank_rows=sum(1 for r in parsed if r.node_rank is None),
             duplicate_parent_rows_removed=len(parsed) - len(parent_rows),
-            duplicate_title_rows_removed=len(parent_rows) - len(suspicious_rows),
+            duplicate_title_rows_removed=len(metric_rows) - len(suspicious_rows),
+            duplicate_metric_rows_removed=len(parent_rows) - len(metric_rows),
+            dedupe_unjudgeable_rows=unjudgeable,
+            missing_seller_rows=sum(1 for r in parsed if not r.seller.strip()),
         ),
+        dedupe_audit=dedupe_audit,
     )
 
 

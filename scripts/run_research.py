@@ -289,6 +289,14 @@ def cmd_init(args: argparse.Namespace) -> None:
     )
 
 
+def _bsr_config(args: argparse.Namespace) -> MonthlyBSRConfig:
+    return MonthlyBSRConfig(
+        top_n=args.top_n,
+        dedupe_by_metrics=not getattr(args, "no_metric_dedupe", False),
+        dedupe_exact_title=bool(getattr(args, "dedupe_title", False)),
+    )
+
+
 def _persist_ingest(
     svc: WorkflowService,
     args: argparse.Namespace,
@@ -312,12 +320,15 @@ def _persist_ingest(
         quality[result.month] = {
             "stats": dataclasses.asdict(result.stats),
             "quality": dataclasses.asdict(result.quality),
+            "dedupe_audit": result.dedupe_audit or [],
         }
         summary[result.month] = {
             "input_rows": result.stats.input_rows,
             "output_rows": result.stats.output_rows,
             "duplicate_parent_rows_removed": result.quality.duplicate_parent_rows_removed,
             "duplicate_title_rows_removed": result.quality.duplicate_title_rows_removed,
+            "duplicate_metric_rows_removed": result.quality.duplicate_metric_rows_removed,
+            "dedupe_unjudgeable_rows": result.quality.dedupe_unjudgeable_rows,
             "warnings": result.quality.warning_count,
         }
     replaced_months = {result.month for result in results}
@@ -396,7 +407,7 @@ async def _fetch_live(args: argparse.Namespace, pdir: Path) -> tuple[list[Monthl
         raw_path = raw_dir / f"{month}.json"
         _save_json(raw_path, {"provider": "sellersprite", "operation": "product_research", "rows": rows,
                               "response_pages": response.raw, "request_scope": {"month": month, "marketplace": args.marketplace, "keyword": args.keyword}})
-        results.append(build_monthly_top(rows, month, MonthlyBSRConfig(top_n=args.top_n)))
+        results.append(build_monthly_top(rows, month, _bsr_config(args)))
         snapshot = _snapshot_source(pdir, raw_path)
         artifact_id = f"{month}:sellersprite"
         sources[artifact_id] = {
@@ -452,7 +463,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         month = _resolve_month(args, path)
         snapshot = _snapshot_source(pdir, path)
         rows = read_tabular_rows(snapshot)
-        results.append(build_monthly_top(rows, month, MonthlyBSRConfig(top_n=args.top_n)))
+        results.append(build_monthly_top(rows, month, _bsr_config(args)))
         artifact_id = f"{month}:{path.name}"
         sources[artifact_id] = {
             "artifact_id": artifact_id,
@@ -699,6 +710,8 @@ def cmd_analyze(args: argparse.Namespace) -> None:
                 consecutive_months=args.consecutive_months,
                 early_threshold_window_months=args.early_window,
                 current_survival_threshold=args.survival_threshold,
+                promotion_threshold=args.promotion_threshold,
+                promotion_window_months=args.promotion_window,
             ),
         )
 
@@ -898,6 +911,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--file", action="append", default=[], help="月度数据文件,可多次(文件模式)")
     p.add_argument("--month", help="单文件时指定月份 YYYY-MM")
     p.add_argument("--top-n", type=int, default=100)
+    p.add_argument("--no-metric-dedupe", action="store_true", help="关闭跨父体去重（销量+评分+评分数相同）")
+    p.add_argument("--dedupe-title", action="store_true", help="启用旧口径：品牌+标题去重（可能误删，需人工抽查）")
     p.add_argument("--live", action="store_true", help="通过 MCP 直连 SellerSprite 取数")
     p.add_argument("--marketplace", help="live 模式站点;默认取项目站点")
     p.add_argument("--keyword", help="live 模式调研关键词")
@@ -940,6 +955,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--consecutive-months", type=int, default=3)
     p.add_argument("--early-window", type=int, default=3)
     p.add_argument("--survival-threshold", type=int, default=None)
+    p.add_argument("--promotion-threshold", type=int, default=None,
+                   help="推广阈值（人工设定的腰部销量）；不设则不计算推广率")
+    p.add_argument("--promotion-window", type=int, default=3, help="推广窗口月数（含上架月）")
     p.add_argument("--pair", action="append", default=[], help="份额分解对 YYYY-MM:YYYY-MM")
     p.add_argument("--period", action="append", default=[], help="跨期比较 a起点:a终点:b起点:b终点")
     p.set_defaults(func=cmd_analyze)

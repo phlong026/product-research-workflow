@@ -12,9 +12,11 @@ from .models import (
     HeadSuctionSignal,
     RankLayerMetric,
     RankBandMetric,
+    RankPointMetric,
 )
 
 DEFAULT_RANK_CUTOFFS = (1, 5, 10, 20, 30, 50, 70, 100)
+DEFAULT_RANK_POINTS = (1, 2, 3, 5, 10, 20, 30, 50, 100)
 DEFAULT_RANK_BANDS = ((1, 5, "head_1_5"), (6, 30, "waist_6_30"), (31, 100, "tail_31_100"))
 
 
@@ -38,10 +40,23 @@ def _month(value: str) -> str:
     return f"{int(year):04d}-{int(mon):02d}"
 
 
+def _ranked_by_node(rows: list[BSRRecord]) -> list[BSRRecord]:
+    return sorted(
+        rows,
+        key=lambda r: (
+            r.node_rank is None,
+            r.node_rank if r.node_rank is not None else 10**9,
+            -max(0, r.monthly_sales),
+            r.asin,
+        ),
+    )
+
+
 def build_competition_metrics(
     records: Iterable[BSRRecord],
     *,
     rank_cutoffs: tuple[int, ...] = DEFAULT_RANK_CUTOFFS,
+    rank_points: tuple[int, ...] = DEFAULT_RANK_POINTS,
     head_cutoff: int = 10,
     broad_cutoff: int = 100,
     rank_bands: tuple[tuple[int, int, str], ...] = DEFAULT_RANK_BANDS,
@@ -67,6 +82,14 @@ def build_competition_metrics(
             brand_sales[brand_key] += max(0, row.monthly_sales)
         brand_sorted = sorted(brand_sales.values(), reverse=True)
 
+        seller_sales: dict[str, int] = defaultdict(int)
+        for row in rows:
+            seller_key = unicodedata.normalize("NFKC", row.seller).strip().casefold() or f"<unknown:{row.asin}>"
+            seller_sales[seller_key] += max(0, row.monthly_sales)
+        seller_sorted = sorted(seller_sales.values(), reverse=True)
+        seller_known = sum(1 for r in rows if r.seller.strip())
+        brand_known = sum(1 for r in rows if r.brand.strip())
+
         concentration.append(
             ConcentrationMetric(
                 month=month,
@@ -80,6 +103,14 @@ def build_competition_metrics(
                 ),
                 top3_brand_share_pct=_pct(sum(brand_sorted[:3]), total_sales),
                 top10_brand_share_pct=_pct(sum(brand_sorted[:10]), total_sales),
+                top3_seller_share_pct=(
+                    _pct(sum(seller_sorted[:3]), total_sales) if seller_known else None
+                ),
+                top10_seller_share_pct=(
+                    _pct(sum(seller_sorted[:10]), total_sales) if seller_known else None
+                ),
+                seller_coverage_pct=_pct(seller_known, len(rows)),
+                brand_coverage_pct=_pct(brand_known, len(rows)),
             )
         )
 
@@ -142,6 +173,35 @@ def build_competition_metrics(
                 yoy_pct=_pct_change(sales, prior_sales) if prior_sales is not None else None,
             ))
 
+    rank_point_metrics: list[RankPointMetric] = []
+    point_sales: dict[tuple[str, int], int | None] = {}
+    for month in months:
+        total_sales = sum(max(0, r.monthly_sales) for r in grouped[month])
+        ranked = _ranked_by_node(grouped[month])
+        has_node_rank = all(r.node_rank is not None for r in ranked)
+        for point in sorted(set(rank_points)):
+            if point < 1:
+                raise ValueError("rank point must be >= 1")
+            row = ranked[point - 1] if point <= len(ranked) else None
+            sales = max(0, row.monthly_sales) if row is not None else None
+            point_sales[(month, point)] = sales
+            prior_sales = point_sales.get((_prior_year(month), point))
+            rank_point_metrics.append(
+                RankPointMetric(
+                    month=month,
+                    rank=point,
+                    asin=row.asin if row is not None else None,
+                    sales=sales,
+                    sales_share_pct=(_pct(sales, total_sales) if sales is not None else None),
+                    yoy_pct=(
+                        _pct_change(sales, prior_sales)
+                        if sales is not None and prior_sales is not None
+                        else None
+                    ),
+                    rank_basis="node_rank" if has_node_rank else "sales_fallback",
+                )
+            )
+
     head_suction: list[HeadSuctionSignal] = []
     for month in months:
         prior = _prior_year(month)
@@ -180,4 +240,5 @@ def build_competition_metrics(
         rank_layers=rank_layers,
         rank_bands=rank_band_metrics,
         head_suction=head_suction,
+        rank_points=rank_point_metrics,
     )

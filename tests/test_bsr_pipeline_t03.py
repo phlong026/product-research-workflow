@@ -1,7 +1,7 @@
 from research_workflow.data import MonthlyBSRConfig, build_monthly_top, normalize_seller_region
 
 
-def test_parent_and_title_dedup_then_topn():
+def test_parent_and_legacy_title_dedup_then_topn():
     rows = [
         {"ASIN": "A1", "父ASIN": "P1", "品牌": "BrandA", "商品标题": "Same Product", "月销量": "100", "小类BSR": "10", "卖家所属地": "CN(HK)"},
         {"ASIN": "A2", "父ASIN": "P1", "品牌": "BrandA", "商品标题": "Variant", "月销量": "200", "小类BSR": "8", "卖家所属地": "CN"},
@@ -9,7 +9,7 @@ def test_parent_and_title_dedup_then_topn():
         {"ASIN": "A4", "父ASIN": "", "品牌": "BrandB", "商品标题": "Duplicate   Title", "月销量": "250", "小类BSR": "5", "卖家所属地": "US"},
         {"ASIN": "A5", "父ASIN": "", "品牌": "BrandC", "商品标题": "Other", "月销量": "400", "小类BSR": "1", "卖家所属地": "VC"},
     ]
-    result = build_monthly_top(rows, "2026-04", MonthlyBSRConfig(top_n=3))
+    result = build_monthly_top(rows, "2026-04", MonthlyBSRConfig(top_n=3, dedupe_exact_title=True))
     assert [r.asin for r in result.records] == ["A5", "A3", "A2"]
     assert result.stats.input_rows == 5
     assert result.stats.parent_deduped_rows == 4

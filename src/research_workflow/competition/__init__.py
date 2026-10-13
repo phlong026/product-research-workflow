@@ -1,10 +1,11 @@
-from .metrics import DEFAULT_RANK_BANDS, DEFAULT_RANK_CUTOFFS, build_competition_metrics
+from .metrics import DEFAULT_RANK_BANDS, DEFAULT_RANK_CUTOFFS, DEFAULT_RANK_POINTS, build_competition_metrics
 from .models import (
     CompetitionMetricsResult,
     ConcentrationMetric,
     HeadSuctionSignal,
     RankLayerMetric,
     RankBandMetric,
+    RankPointMetric,
 )
 
 __all__ = [
@@ -12,6 +13,8 @@ __all__ = [
     "ConcentrationMetric",
     "DEFAULT_RANK_CUTOFFS",
     "DEFAULT_RANK_BANDS",
+    "DEFAULT_RANK_POINTS",
+    "RankPointMetric",
     "HeadSuctionSignal",
     "RankLayerMetric",
     "RankBandMetric",
