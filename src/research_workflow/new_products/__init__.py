@@ -1,4 +1,11 @@
 from .engine import analyze_new_products
+from .queue import (
+    MonthCoverage,
+    NewProductQueue,
+    NewProductQueueItem,
+    QueueExclusion,
+    build_new_product_queue,
+)
 from .models import (
     AccountTypeMetric,
     NewProductAnalysisResult,
@@ -10,6 +17,11 @@ from .models import (
 )
 
 __all__ = [
+    "MonthCoverage",
+    "NewProductQueue",
+    "NewProductQueueItem",
+    "QueueExclusion",
+    "build_new_product_queue",
     "AccountTypeMetric",
     "NewProductAnalysisResult",
     "NewProductConfig",
