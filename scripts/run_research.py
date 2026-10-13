@@ -22,6 +22,7 @@ import sqlite3
 import shutil
 import tempfile
 import sys
+from datetime import date
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, get_args, get_origin, get_type_hints
@@ -45,7 +46,13 @@ from research_workflow.classification.models import (
 )
 from research_workflow.competition import build_competition_metrics
 from research_workflow.competition.models import CompetitionMetricsResult
-from research_workflow.data import MonthlyBSRConfig, build_monthly_top
+from research_workflow.data import (
+    MonthlyBSRConfig,
+    available_month_window,
+    build_monthly_top,
+    month_coverage_report,
+)
+from research_workflow.discovery import discover_nodes, fetch_monthly_top, merge_nodes_by_asin
 from research_workflow.data.io import read_tabular_rows
 from research_workflow.data.models import BSRRecord, MonthlyBSRResult
 from research_workflow.data.bsr_pipeline import validate_month, _to_int
@@ -70,6 +77,15 @@ from research_workflow.store import SQLiteStore
 from research_workflow.workflow import WorkflowService
 
 MONTH_IN_FILENAME = re.compile(r"(20\d{2})[-_.]?(\d{2})")
+
+
+def _today() -> date:
+    """可被测试替换的当前日期(月份窗口自动化用)。"""
+    return date.today()
+
+
+def _safe_name(value: str) -> str:
+    return re.sub(r"[^0-9A-Za-z_.-]", "_", value)
 
 
 # --- JSON <-> dataclass 重建(所有研究模型均为扁平 dataclass) ---
@@ -296,6 +312,7 @@ def _persist_ingest(
     results: list[MonthlyBSRResult],
     sources: dict[str, Any],
     source_mode: str,
+    coverage: dict[str, Any] | None = None,
 ) -> None:
     by_month: dict[str, list[dict[str, Any]]] = (
         _load_json(pdir / "records.json") if (pdir / "records.json").exists() else {}
@@ -334,13 +351,17 @@ def _persist_ingest(
     _save_json(pdir / "records.json", by_month)
     _save_json(pdir / "quality.json", quality)
     _save_json(pdir / "sources.json", all_sources)
+    if coverage is not None:
+        _save_json(pdir / "coverage.json", coverage)
     svc.set_step(args.project, "collect_bsr", StepStatus.COMPLETED, output_ref="records.json")
     checkpoint = svc.request_human_checkpoint(
         args.project,
         "data_review",
         "请检查清洗后的月度数据(行数、去重、质量警告),确认后继续。",
         {"months": summary, "sources": list(all_sources.values()), "source_mode": source_mode,
-         "artifact_hashes": _hashes(pdir, ["records.json", "quality.json", "sources.json"])},
+         "missing_months": sorted(coverage["missing"]) if coverage else [],
+         "artifact_hashes": _hashes(pdir, ["records.json", "quality.json", "sources.json"]
+                                    + (["coverage.json"] if coverage is not None else []))},
     )
     _emit(
         {
@@ -348,6 +369,10 @@ def _persist_ingest(
             "source_mode": source_mode,
             "months": summary,
             "records_file": str(pdir / "records.json"),
+            **({"missing_months": sorted(coverage["missing"]),
+                "coverage": {"complete": coverage["complete"], "expected": len(coverage["expected"]),
+                             "present": len(coverage["present"])},
+                "nodes": coverage["nodes"]} if coverage is not None else {}),
             "checkpoint_id": checkpoint.id,
             "checkpoint_step": "data_review",
             "next": "resolve --approve 后进入 classify",
@@ -355,14 +380,7 @@ def _persist_ingest(
     )
 
 
-async def _fetch_live(args: argparse.Namespace, pdir: Path) -> tuple[list[MonthlyBSRResult], dict[str, Any]]:
-    months = list(dict.fromkeys(m.strip() for m in args.months.split(",") if m.strip()))
-    if not months or len(months) > 60:
-        raise ValueError("--months 必须提供 1 至 60 个有效月份")
-    for month in months:
-        validate_month(month)
-    if not 1 <= args.max_pages <= 20 or not 1 <= args.page_size <= 100 or args.top_n < 1:
-        raise ValueError("分页上限为 20，每页 1 至 100，top-n 必须大于零")
+async def _open_connector() -> SellerSpriteConnector:
     _load_dotenv(ROOT / ".env")
     gateway = _build_gateway(ROOT / "config" / "mcp.json")
     connector = SellerSpriteConnector(gateway)
@@ -381,33 +399,77 @@ async def _fetch_live(args: argparse.Namespace, pdir: Path) -> tuple[list[Monthl
             )
             or 1
         )
+    return connector
+
+
+def _live_months(spec: str) -> tuple[list[str], bool]:
+    """返回 (月份列表, 是否自动窗口)。auto = 近三年可得月份窗口(缺月允许,显式报告)。"""
+    if spec.strip().lower() == "auto":
+        return available_month_window(_today()), True
+    months = list(dict.fromkeys(m.strip() for m in spec.split(",") if m.strip()))
+    if not months or len(months) > 60:
+        raise ValueError("--months 必须提供 1 至 60 个有效月份")
+    for month in months:
+        validate_month(month)
+    return months, False
+
+
+async def _fetch_live(args: argparse.Namespace, pdir: Path) -> tuple[list[MonthlyBSRResult], dict[str, Any], dict[str, Any]]:
+    months, auto = _live_months(args.months)
+    nodes = list(dict.fromkeys(n.strip() for n in (args.nodes or "").split(",") if n.strip()))
+    if not 1 <= args.max_pages <= 20 or not 1 <= args.page_size <= 100 or args.top_n < 1:
+        raise ValueError("分页上限为 20，每页 1 至 100，top-n 必须大于零")
+    if args.candidate_n < args.top_n:
+        raise ValueError("--candidate-n(候选池)不能小于 --top-n")
+    connector = await _open_connector()
+    scopes: list[str | None] = nodes or [None]
+    fetched = {}
+    for scope in scopes:
+        fetched[scope] = await fetch_monthly_top(
+            connector, marketplace=args.marketplace, keyword=args.keyword, months=months,
+            node_id_paths=[scope] if scope else None, top_n=args.candidate_n,
+            page_size=args.page_size, max_pages=args.max_pages)
+
     results: list[MonthlyBSRResult] = []
     sources: dict[str, Any] = {}
+    missing: dict[str, str] = {}
+    partial_nodes: dict[str, list[str]] = {}
     raw_dir = pdir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     for month in months:
-        response = await connector.product_research(
-            marketplace=args.marketplace,
-            keyword=args.keyword,
-            month=month,
-            page_size=args.page_size,
-            max_pages=args.max_pages,
-        )
-        rows = response.data.get("items", []) if isinstance(response.data, dict) else []
-        raw_path = raw_dir / f"{month}.json"
-        _save_json(raw_path, {"provider": "sellersprite", "operation": "product_research", "rows": rows,
-                              "response_pages": response.raw, "request_scope": {"month": month, "marketplace": args.marketplace, "keyword": args.keyword}})
+        have = {scope: f for scope, f in fetched.items() if month in f.rows_by_month}
+        if not have:
+            missing[month] = "; ".join(sorted({f.missing_months.get(month, "no data") for f in fetched.values()}))
+            continue
+        lacking = sorted(str(scope) for scope in fetched if scope not in have)
+        if lacking:
+            partial_nodes[month] = lacking
+        for scope, f in have.items():
+            suffix = f"__{_safe_name(scope)}" if scope else ""
+            raw_path = raw_dir / f"{month}{suffix}.json"
+            _save_json(raw_path, {"provider": "sellersprite", "operation": "product_research",
+                                  "rows": list(f.rows_by_month[month]), "response_pages": f.raw_by_month[month],
+                                  "request_scope": f.requests[month]})
+            snapshot = _snapshot_source(pdir, raw_path)
+            artifact_id = f"{month}:sellersprite" + (f":{scope}" if scope else "")
+            sources[artifact_id] = {
+                "artifact_id": artifact_id,
+                "name": f"sellersprite product_research {month}" + (f" node={scope}" if scope else ""),
+                "kind": "mcp",
+                "source": snapshot.relative_to(pdir).as_posix(),
+                "sha256": _sha256_file(snapshot),
+            }
+        if len(have) > 1:  # 分散型产品:多节点样本按 ASIN 合并去重
+            rows = list(merge_nodes_by_asin({str(s): list(f.rows_by_month[month]) for s, f in have.items()}).items)
+        else:
+            rows = list(next(iter(have.values())).rows_by_month[month])
         results.append(build_monthly_top(rows, month, MonthlyBSRConfig(top_n=args.top_n)))
-        snapshot = _snapshot_source(pdir, raw_path)
-        artifact_id = f"{month}:sellersprite"
-        sources[artifact_id] = {
-            "artifact_id": artifact_id,
-            "name": f"sellersprite product_research {month}",
-            "kind": "mcp",
-            "source": snapshot.relative_to(pdir).as_posix(),
-            "sha256": _sha256_file(snapshot),
-        }
-    if results and all(result.stats.parsed_rows == 0 for result in results):
+
+    if missing and not auto:
+        raise ValueError(f"显式指定的月份无数据,不能静默跳过: {sorted(missing)};请改月份或使用 --months auto")
+    if not results:
+        raise ValueError("所有月份均无数据;检查关键词、站点、节点或登录状态")
+    if all(result.stats.parsed_rows == 0 for result in results):
         raise SystemExit(
             _emit(
                 {
@@ -417,7 +479,33 @@ async def _fetch_live(args: argparse.Namespace, pdir: Path) -> tuple[list[Monthl
             )
             or 1
         )
-    return results, sources
+    coverage = month_coverage_report(months, [r.month for r in results]).to_dict()
+    coverage.update({"missing_reasons": missing, "partial_node_months": partial_nodes, "nodes": nodes,
+                     "window": "auto" if auto else "explicit"})
+    return results, sources, coverage
+
+
+def cmd_discover_nodes(args: argparse.Namespace) -> None:
+    svc = _service(args)
+    project = svc.store.get_project(args.project)
+    if project is None:
+        raise KeyError(f"Unknown project: {args.project}")
+    keyword = args.keyword or project.primary_keyword
+    if not keyword:
+        raise ValueError("必须提供 --keyword 或项目 primary_keyword")
+    if args.month:
+        validate_month(args.month)
+    pdir = _project_dir(args, args.project)
+
+    async def run():
+        connector = await _open_connector()
+        return await discover_nodes(connector, marketplace=project.marketplace, keyword=keyword, month=args.month)
+
+    result = asyncio.run(run())
+    payload = dataclasses.asdict(result)
+    payload.update({"keyword": keyword, "month": args.month, "project_id": args.project})
+    _save_json(pdir / "nodes.json", payload)
+    _emit({**payload, "next": "人工确认主节点/多节点后,用 ingest --live --nodes <node_id,...> 取数"})
 
 
 def cmd_ingest(args: argparse.Namespace) -> None:
@@ -436,8 +524,8 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         args.keyword = args.keyword or project.primary_keyword
         if not args.keyword:
             raise ValueError("live 模式必须提供 --keyword 或项目 primary_keyword，避免无范围取数")
-        results, sources = asyncio.run(_fetch_live(args, pdir))
-        _persist_ingest(svc, args, pdir, results, sources, source_mode="mcp:sellersprite")
+        results, sources, coverage = asyncio.run(_fetch_live(args, pdir))
+        _persist_ingest(svc, args, pdir, results, sources, source_mode="mcp:sellersprite", coverage=coverage)
         return
 
     if not args.months:
@@ -920,10 +1008,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--live", action="store_true", help="通过 MCP 直连 SellerSprite 取数")
     p.add_argument("--marketplace", help="live 模式站点;默认取项目站点")
     p.add_argument("--keyword", help="live 模式调研关键词")
-    p.add_argument("--months", help="live 模式月份列表,如 2025-01,2026-01")
+    p.add_argument("--months", help="live 模式月份列表,如 2025-01,2026-01;auto = 近三年可得月份窗口(缺月显式报告)")
+    p.add_argument("--nodes", help="live 模式类目节点 nodeIdPath,逗号分隔;多节点按 ASIN 合并(须先人工确认节点)")
+    p.add_argument("--candidate-n", type=int, default=200, help="每月候选池大小(默认 Top200),清洗后截取 --top-n")
     p.add_argument("--page-size", type=int, default=100)
     p.add_argument("--max-pages", type=int, default=20)
     p.set_defaults(func=cmd_ingest)
+
+    p = sub.add_parser("discover-nodes", help="枚举关键词样本的类目节点与 ASIN 数,给出主节点建议(须人工确认)")
+    p.add_argument("--project", required=True)
+    p.add_argument("--keyword")
+    p.add_argument("--month", help="样本月份 YYYY-MM;默认不限月")
+    p.set_defaults(func=cmd_discover_nodes)
 
     p = sub.add_parser("login", help="触发 SellerSprite MCP 登录流程(CDP Chrome)")
     p.add_argument("--wait", type=int, default=180)
