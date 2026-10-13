@@ -115,3 +115,16 @@ def test_rank_point_is_nth_position_not_raw_node_rank():
     assert (pts[2].asin, pts[2].sales) == ("C", 70)     # 原始排名 3 的商品，位次是第 2
     assert (pts[3].asin, pts[3].sales) == ("D", 60)     # 重复排名按销量降序稳定排位
     assert pts[4].asin is None and pts[4].sales is None  # 不存在的位次是未知，不是 0
+
+
+def test_retention_numerator_does_not_require_historical_launch_success():
+    """已确认口径：留存只看当期是否达标，不要求历史连续达标。"""
+    snaps = _snaps("LATE", {"2026-04": 300})                                      # 只出现一个月：从未“连续达标”
+    snaps += _snaps("ZIGZAG", {"2026-01": 300, "2026-02": 10, "2026-03": 300, "2026-04": 300})
+    snaps += _snaps("LOW", {"2026-01": 300, "2026-02": 300, "2026-03": 300, "2026-04": 10})  # 曾达标但当期不达标
+    r = analyze_new_products(snaps, NewProductConfig())
+    by = {o.asin: o for o in r.outcomes}
+    assert by["LATE"].launch_success is False and by["LATE"].retained is True
+    assert by["ZIGZAG"].launch_success is False and by["ZIGZAG"].retained is True
+    assert by["LOW"].launch_success is True and by["LOW"].retained is False
+    assert r.summary.retained_products == 2 and r.summary.retention_rate_pct == (2 / 3) * 100
