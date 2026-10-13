@@ -37,7 +37,7 @@ description: 跨境选品研究工作流。当用户要求研究亚马逊产品/
 
 ## 运行边界
 
-当前CLI使用规则分类和模板解释，不调用LLM；ASIN补全跳过；确认研究路线只登记待办，不自动执行支线。上线边界见 `docs/RELEASE_READINESS.md`。重跑上游会使下游审批和工件失效；旧检查点不能审批新结果，缺销量/空月份数据须先修正。导出必须选择新的空目录。旧版本项目须从ingest重新人工复核。Codex注册仅保存令牌环境变量引用；启动Codex前须安全注入变量，不能假设它自动读取引擎`.env`。
+分类默认使用规则；`classify --provider llm`（需 `ANTHROPIC_API_KEY` 与可选依赖 `.[llm]`，输出稳定性未做生产验收）会把歧义项标为待人工，待人工行必须用 `--edit` 逐一指定后才能批准；`classify --enrich` 经 SellerSprite 补齐缺失地区与卖点（需已登录，冲突写入 `enrichment.json` 供复核）；市场解释仍为确定性模板；确认研究路线只登记待办，不自动执行支线。上线边界见 `docs/RELEASE_READINESS.md`。重跑上游会使下游审批和工件失效；旧检查点不能审批新结果，缺销量/空月份数据须先修正。导出必须选择新的空目录。旧版本项目须从ingest重新人工复核。Codex注册仅保存令牌环境变量引用；启动Codex前须安全注入变量，不能假设它自动读取引擎`.env`。
 
 ## 执行协议
 
@@ -54,15 +54,26 @@ $PY $ENGINE/scripts/run_research.py ingest --project <ID> --file <月度导出�
 $PY $ENGINE/scripts/run_research.py ingest --project <ID> --live \
     --keyword "ice maker" --months 2025-01,2026-01 [--max-pages 20]
   → 原始响应留档 <项目目录>/raw/,同样进入数据检查点
+  --months auto = 近三年可得月份窗口(缺月写入 coverage.json 并在输出 missing_months 中显式列出,不当 0);
+  显式月份若无数据会直接报错;每月先取 --candidate-n(默认 200)候选池,清洗后截取 --top-n(默认 100)。
+
+# 节点发现(取数前,主节点必须人工确认)
+$PY $ENGINE/scripts/run_research.py discover-nodes --project <ID> [--keyword "ice maker"] [--month 2026-01]
+  → 输出节点候选与 ASIN 数、主节点建议(needs_human_confirmation=true),写 nodes.json
+$PY $ENGINE/scripts/run_research.py ingest --project <ID> --live --keyword ... --months ... --nodes <nodeIdPath1,nodeIdPath2>
+  → 按 节点×月 分存原始响应(raw/<月>__<节点>.json),多节点样本按 ASIN 合并去重
 
 $PY $ENGINE/scripts/run_research.py classify --project <ID> \
     --label "nugget=咀嚼冰" --label "bullet=子弹冰" \
-    [--rule "nugget=nugget, chewing ice"]
+    [--rule "nugget=nugget, chewing ice"] [--provider rules|llm] [--enrich]
   → 分类检查点 classification_review(标签体系由用户定义;--rule 关键词规则可选)
 
 $PY $ENGINE/scripts/run_research.py analyze --project <ID> \
     [--pair 2025-01:2026-01] [--period 2025-01:2025-04:2026-01:2026-04] \
-    [--new-products-file <新品表>] [--sales-threshold 300 --consecutive-months 3]
+    [--new-products-file <新品表>] [--sales-threshold 300 --consecutive-months 3] \
+    [--promotion-threshold N --retention-threshold N --study-month YYYY-MM]
+  → 两个阈值（推起腰部销量 / 留存销量）须业务确认；提供 --study-month 时新品输入最大月份必须一致；
+    同时产出 new_product_queue.json(新品队列、老带新排除清单)与 iteration.json(产品迭代进程)
   → 路线检查点 research_route_review
 
 $PY $ENGINE/scripts/run_research.py dossier --project <ID> --output $ENGINE/runtime/<ID>/dossier
@@ -92,7 +103,7 @@ $PY $ENGINE/scripts/run_research.py projects
 ## 输入数据要求
 
 - **月度 BSR 导出**(必需):CSV/XLSX/JSON,一个文件一个月,文件名含 `YYYY-MM`(否则单文件配 `--month`)。列名兼容中英文别名:ASIN、月销量/销量、品牌、商品标题、小类BSR/节点排名、卖家所属地、上架时间、父ASIN。典型来源:SellerSprite 商品调研导出。
-- **新品跟踪表**(可选,供 T09):列 ASIN、月份、月销量、上架时间、账号类型(VC/SC)、卖家所属地、细分。
+- **新品跟踪表**(可选,供 T09):列 ASIN、月份、月销量、上架时间、账号类型(VC/SC)、卖家所属地、细分、父ASIN(用于识别老带新)。
 - 用户没有数据文件时:优先询问是否走 MCP 直连(需已部署且 SellerSprite 已登录);两者都不满足时说明所需文件;如用户只想看效果,可运行 `$PY $ENGINE/scripts/run_offline_demo.py --output $ENGINE/runtime/offline-demo` 演示。
 
 ## 汇报规则(dossier 生成后)
