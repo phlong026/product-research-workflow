@@ -719,10 +719,10 @@ def cmd_classify(args: argparse.Namespace) -> None:
     )
 
 
-def cmd_status(args: argparse.Namespace) -> None:
-    svc = _service(args)
-    snapshot = svc.snapshot(args.project)
-    pdir = Path(args.root) / args.project
+def status_payload(svc: WorkflowService, root: str | Path, project_id: str) -> dict[str, Any]:
+    """项目现场:状态快照、待裁决检查点、已有工件、下一步(CLI 与 Web 共用,只读)。"""
+    snapshot = svc.snapshot(project_id)
+    pdir = Path(root) / project_id
     pending: dict[str, Any] | None = None
     checkpoint_id = snapshot["state"].get("pending_checkpoint_id")
     if checkpoint_id:
@@ -749,14 +749,11 @@ def cmd_status(args: argparse.Namespace) -> None:
         next_action = "dossier"
     else:
         next_action = "done"
-    _emit(
-        {
-            **snapshot,
-            "pending_checkpoint": pending,
-            "artifacts": artifacts,
-            "next": next_action,
-        }
-    )
+    return {**snapshot, "pending_checkpoint": pending, "artifacts": artifacts, "next": next_action}
+
+
+def cmd_status(args: argparse.Namespace) -> None:
+    _emit(status_payload(_service(args), args.root, args.project))
 
 
 def cmd_resolve(args: argparse.Namespace) -> None:
