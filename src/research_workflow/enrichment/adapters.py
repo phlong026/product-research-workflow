@@ -32,6 +32,26 @@ BULLET_ALIASES = (
 )
 
 
+# Amazon account types ("VC" = Vendor Central) are not geography. They must never
+# land in seller_region; they are kept separately as attributes["account_type"].
+_ACCOUNT_TYPE_TOKENS: dict[str, str] = {
+    "VC": "VC",
+    "VENDOR": "VC",
+    "VENDORCENTRAL": "VC",
+    "SC": "SC",
+    "SELLERCENTRAL": "SC",
+}
+
+
+def split_region_and_account_type(value: Any) -> tuple[str, str | None]:
+    """Return (normalized geographic region, account type or None)."""
+    token = str(value or "").strip().upper().replace(" ", "")
+    account_type = _ACCOUNT_TYPE_TOKENS.get(token)
+    if account_type:
+        return "UNKNOWN", account_type
+    return normalize_seller_region(value), None
+
+
 def _first(mapping: Mapping[str, Any], aliases: Iterable[str]) -> Any:
     for key in aliases:
         value = mapping.get(key)
@@ -126,10 +146,14 @@ def profile_from_payload(payload: Any, *, asin: str, source: str) -> ASINProfile
         return None
     title = str(_first(item, ALIASES["title"]) or "").strip()
     bullets = _normalize_bullets(_first(item, BULLET_ALIASES))
-    seller_region = normalize_seller_region(_first(item, ALIASES["seller_region"]))
+    seller_region, account_type = split_region_and_account_type(
+        _first(item, ALIASES["seller_region"])
+    )
 
     known = {name for aliases in ALIASES.values() for name in aliases} | set(BULLET_ALIASES)
     attributes = {k: v for k, v in item.items() if k not in known}
+    if account_type:
+        attributes.setdefault("account_type", account_type)
 
     return ASINProfile(
         asin=actual_asin,

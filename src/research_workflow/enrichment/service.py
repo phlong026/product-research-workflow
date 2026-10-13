@@ -128,5 +128,13 @@ class ASINEnrichmentService:
 
 
 def _is_complete_enough(profile: ASINProfile) -> bool:
-    """Fields needed by classification and downstream market analysis."""
-    return bool(profile.title and profile.brand and profile.bullets)
+    """Fields needed by classification and downstream market analysis.
+
+    seller_region counts: a profile without a known region keeps going to fallbacks.
+    """
+    return bool(
+        profile.title
+        and profile.brand
+        and profile.bullets
+        and profile.seller_region not in {"", "UNKNOWN"}
+    )

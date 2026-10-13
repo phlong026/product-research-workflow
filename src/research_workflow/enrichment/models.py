@@ -39,3 +39,56 @@ class EnrichmentStats:
 class EnrichmentResult:
     profiles: dict[str, ASINProfile]
     stats: EnrichmentStats
+
+
+@dataclass(slots=True, frozen=True)
+class EnrichmentConflict:
+    """Same field, different values across sources. Never resolved silently."""
+
+    asin: str
+    field: str
+    values: dict[str, str]  # source name -> value
+    chosen: str  # value kept (first source in provider order); needs human review
+    month: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class EnrichmentFailure:
+    asin: str
+    source: str
+    error: str
+
+
+@dataclass(slots=True)
+class EnrichmentReport:
+    """Result of a targeted backfill of seller_region."""
+
+    profiles: dict[str, ASINProfile]
+    total_profiles: int
+    targeted: int
+    filled: int
+    unknown_before: int
+    unknown_after: int
+    conflicts: list[EnrichmentConflict] = field(default_factory=list)
+    failures: list[EnrichmentFailure] = field(default_factory=list)
+
+    @property
+    def unknown_ratio_before(self) -> float:
+        return self.unknown_before / self.total_profiles if self.total_profiles else 0.0
+
+    @property
+    def unknown_ratio_after(self) -> float:
+        return self.unknown_after / self.total_profiles if self.total_profiles else 0.0
+
+
+@dataclass(slots=True)
+class BulletBackfill:
+    """Result of backfilling bullets once per unique ASIN across all months."""
+
+    bullets_by_asin: dict[str, list[str]]
+    filled_records: dict[str, list[dict[str, Any]]]
+    unique_asins: int
+    fetched_asins: int
+    missing_asins: list[str] = field(default_factory=list)
+    conflicts: list[EnrichmentConflict] = field(default_factory=list)
+    failures: list[EnrichmentFailure] = field(default_factory=list)
