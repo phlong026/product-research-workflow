@@ -1,4 +1,18 @@
 from .evidence import EvidenceLedger, ExternalEvidence
+from .tiktok import (
+    CagrResult,
+    ProjectionPoint,
+    ProjectionResult,
+    ShareResult,
+    TikTokAnalysis,
+    UnitsRecord,
+    analyze_tiktok,
+    cagr_2024_2026,
+    load_units_file,
+    parse_units_rows,
+    project_2026_2028,
+    tiktok_share,
+)
 from .trends import (
     GoogleTrendsExport,
     TrendSeries,
@@ -12,15 +26,27 @@ from .trends import (
 )
 
 __all__ = [
+    "CagrResult",
     "EvidenceLedger",
     "ExternalEvidence",
     "GoogleTrendsExport",
+    "ProjectionPoint",
+    "ProjectionResult",
+    "ShareResult",
+    "TikTokAnalysis",
     "TrendSeries",
+    "UnitsRecord",
+    "analyze_tiktok",
+    "cagr_2024_2026",
     "check_trends_consistency",
     "combine_for_chart",
     "import_report_excerpts",
     "load_trends_csv",
+    "load_units_file",
     "parse_report_excerpts",
     "parse_trends_csv",
+    "parse_units_rows",
+    "project_2026_2028",
+    "tiktok_share",
     "trends_to_evidence",
 ]
