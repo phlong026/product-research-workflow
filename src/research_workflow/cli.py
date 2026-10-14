@@ -1056,6 +1056,7 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     _save_json(pdir / "competition.json", competition.to_dict())
     if new_products is not None:
         _save_json(pdir / "new_products.json", new_products.to_dict())
+    if new_product_queue is not None:  # 队列与阈值无关:只要新品表解析过就留存(队列剔除与覆盖审计)
         _save_json(pdir / "new_product_queue.json", new_product_queue.to_dict())
     _save_json(pdir / "iteration.json", iteration.to_dict())
     _save_json(pdir / "route_plan.json", route_plan.to_dict())

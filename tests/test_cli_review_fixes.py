@@ -321,6 +321,8 @@ def test_new_product_metrics_are_not_computed_without_manual_thresholds(approved
     ctx = json.loads((pdir / "analysis_context.json").read_text(encoding="utf-8"))
     assert "推起阈值" in ctx["new_products_skipped_reason"] and "留存阈值" in ctx["new_products_skipped_reason"]
     assert ctx["new_products_source"] is not None  # 输入文件仍作为来源留档
+    # 队列与阈值无关(剔除与覆盖审计),新品表解析过就必须留存
+    assert (pdir / "new_product_queue.json").exists()
 
 
 def test_only_one_threshold_set_still_skips_and_names_the_missing_one(approved, tmp_path, capsys) -> None:
