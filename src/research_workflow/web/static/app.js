@@ -947,7 +947,7 @@
   function analyzePanel() {
     const msg = h("div");
     const newProducts = fileInput(false);
-    const sales = h("input", { type: "number", min: "0", value: "250" });
+    const sales = h("input", { type: "number", min: "0", placeholder: "可选;仅作回退" });
     const consecutive = h("input", { type: "number", min: "1", max: "24", value: "3" });
     const early = h("input", { type: "number", min: "1", max: "24", value: "3" });
     const survival = h("input", { type: "number", min: "0" });
@@ -960,12 +960,11 @@
       const mine = wb;
       try {
         const params = {
-          sales_threshold: intOrNull(sales, "销量阈值", 0) ?? 250,
           consecutive_months: intOrNull(consecutive, "连续月数", 1) ?? 3,
           early_window: intOrNull(early, "早期窗口", 1) ?? 3,
         };
-        for (const [key, input, label] of [["survival_threshold", survival, "存活阈值"],
-          ["promotion_threshold", promotion, "晋升阈值"], ["retention_threshold", retention, "留存阈值"]]) {
+        for (const [key, input, label] of [["sales_threshold", sales, "销量阈值"], ["survival_threshold", survival, "存活阈值"],
+          ["promotion_threshold", promotion, "推起阈值"], ["retention_threshold", retention, "留存阈值"]]) {
           const value = intOrNull(input, label, 0);
           if (value !== null) params[key] = value;
         }
@@ -996,10 +995,10 @@
     return h("section", { class: "card", "aria-labelledby": "analyze-title" },
       h("h2", { id: "analyze-title" }, "步骤 5 · 分析"),
       h("p", { class: "muted" }, "所有指标由确定性程序计算;缺月按「未知」处理,不会当作零销量。完成后进入路线检查点。"),
-      field("新品表(可选,csv / xlsx / json)", newProducts, "提供后才会做新品存活/晋升分析"),
+      field("新品表(可选,csv / xlsx / json)", newProducts, "提供后才会做新品分析;须同时填写下方「推起阈值」和「留存阈值」(无内置默认值,未填则不计算新品指标并在资料包里说明)"),
       h("div", { class: "grid" },
-        field("销量阈值", sales), field("连续达标月数", consecutive), field("早期窗口(月)", early),
-        field("存活阈值(可选)", survival), field("晋升阈值(可选)", promotion), field("留存阈值(可选)", retention),
+        field("旧版统一阈值(可选,仅作回退)", sales), field("连续达标月数", consecutive), field("早期窗口(月)", early),
+        field("存活阈值(可选)", survival), field("推起阈值(人工腰部销量)", promotion), field("留存阈值(月销量)", retention),
         field("研究月(可选)", study, "默认取数据中最新月份")),
       h("div", { class: "grid" },
         field("份额分解对(可选,每行一对)", pairs, "格式 YYYY-MM:YYYY-MM,基期:现期"),

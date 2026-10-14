@@ -274,14 +274,15 @@ def test_new_product_analysis_uses_queue_filter(approved, tmp_path, capsys) -> N
         {"ASIN": "NEW", "月份": "2026-03", "月销量": "300", "上架时间": "2026-01-10", "父ASIN": "PN", "细分": "n"},
     ]
     path = _write(tmp_path / "np.csv", rows)
-    run(tmp_path, capsys, "analyze", "--project", pid, "--new-products-file", path, "--study-month", "2026-03")
+    run(tmp_path, capsys, "analyze", "--project", pid, "--new-products-file", path, "--study-month", "2026-03",
+        "--promotion-threshold", "250", "--retention-threshold", "250")
     summary = json.loads((tmp_path / "projects" / pid / "new_products.json").read_text(encoding="utf-8"))["summary"]
     assert summary["retention_denominator_products"] == 1  # OLD(2020 年上架)不是新品,不进分母
     ctx = json.loads((tmp_path / "projects" / pid / "analysis_context.json").read_text(encoding="utf-8"))
     assert ctx["new_products_excluded_by_queue"] == 1
     # 新品表已人工预筛时可显式关闭队列过滤
     run(tmp_path, capsys, "analyze", "--project", pid, "--new-products-file", path, "--study-month", "2026-03",
-        "--skip-queue-filter")
+        "--skip-queue-filter", "--promotion-threshold", "250", "--retention-threshold", "250")
     summary = json.loads((tmp_path / "projects" / pid / "new_products.json").read_text(encoding="utf-8"))["summary"]
     assert summary["retention_denominator_products"] == 2
 
@@ -296,3 +297,61 @@ def test_stale_coverage_and_table_edits_are_cleaned_on_new_ingest(gw, tmp_path, 
     (tmp_path / "2026-01.csv").write_text(CSV, encoding="utf-8")
     run(tmp_path, capsys, "ingest", "--project", pid, "--file", str(tmp_path / "2026-01.csv"))
     assert not (pdir / "coverage.json").exists()
+
+
+# --- 推起/留存阈值没有内置默认:未设置就不算新品指标并如实披露 ---
+
+def _np_rows():
+    return [{"ASIN": "NEW", "月份": f"2026-0{m}", "月销量": "300", "上架时间": "2026-01-10", "父ASIN": "PN", "细分": "n"}
+            for m in (1, 2, 3)]
+
+
+def _approved_classified(approved, tmp_path, capsys):
+    cls = run(tmp_path, capsys, "classify", "--project", approved, "--label", "n=N", "--rule", "n=nugget")
+    run(tmp_path, capsys, "resolve", "--project", approved, "--checkpoint", cls["checkpoint_id"], "--approve")
+    return approved
+
+
+def test_new_product_metrics_are_not_computed_without_manual_thresholds(approved, tmp_path, capsys) -> None:
+    pid = _approved_classified(approved, tmp_path, capsys)
+    path = _write(tmp_path / "np.csv", _np_rows())
+    run(tmp_path, capsys, "analyze", "--project", pid, "--new-products-file", path, "--study-month", "2026-03")
+    pdir = tmp_path / "projects" / pid
+    assert not (pdir / "new_products.json").exists()  # 没有悄悄用 250 算出一套看似真实的数字
+    ctx = json.loads((pdir / "analysis_context.json").read_text(encoding="utf-8"))
+    assert "推起阈值" in ctx["new_products_skipped_reason"] and "留存阈值" in ctx["new_products_skipped_reason"]
+    assert ctx["new_products_source"] is not None  # 输入文件仍作为来源留档
+    # 队列与阈值无关(剔除与覆盖审计),新品表解析过就必须留存
+    assert (pdir / "new_product_queue.json").exists()
+
+
+def test_only_one_threshold_set_still_skips_and_names_the_missing_one(approved, tmp_path, capsys) -> None:
+    pid = _approved_classified(approved, tmp_path, capsys)
+    path = _write(tmp_path / "np.csv", _np_rows())
+    run(tmp_path, capsys, "analyze", "--project", pid, "--new-products-file", path, "--study-month", "2026-03",
+        "--promotion-threshold", "200")
+    ctx = json.loads((tmp_path / "projects" / pid / "analysis_context.json").read_text(encoding="utf-8"))
+    assert "留存阈值" in ctx["new_products_skipped_reason"] and "推起阈值" not in ctx["new_products_skipped_reason"]
+
+
+def test_explicit_legacy_sales_threshold_is_an_allowed_fallback_for_both(approved, tmp_path, capsys) -> None:
+    pid = _approved_classified(approved, tmp_path, capsys)
+    path = _write(tmp_path / "np.csv", _np_rows())
+    run(tmp_path, capsys, "analyze", "--project", pid, "--new-products-file", path, "--study-month", "2026-03",
+        "--sales-threshold", "250")
+    pdir = tmp_path / "projects" / pid
+    summary = json.loads((pdir / "new_products.json").read_text(encoding="utf-8"))["summary"]
+    assert summary["promotion_waist_sales_threshold"] == 250 and summary["retention_sales_threshold"] == 250
+    assert json.loads((pdir / "analysis_context.json").read_text(encoding="utf-8"))["new_products_skipped_reason"] is None
+
+
+def test_dossier_discloses_why_new_product_metrics_are_missing(approved, tmp_path, capsys) -> None:
+    pid = _approved_classified(approved, tmp_path, capsys)
+    path = _write(tmp_path / "np.csv", _np_rows())
+    cp = run(tmp_path, capsys, "analyze", "--project", pid, "--new-products-file", path,
+             "--study-month", "2026-03")["checkpoint_id"]
+    run(tmp_path, capsys, "resolve", "--project", pid, "--checkpoint", cp, "--approve", "--select", "")
+    out = run(tmp_path, capsys, "dossier", "--project", pid, "--output", str(tmp_path / "out"))
+    assert out["project_status"] == "completed"
+    report = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
+    assert "系统不使用内置默认数值" in report
