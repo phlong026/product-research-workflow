@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
@@ -7,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
+from . import deep_dive as deep_dive_section
 from . import external as external_section
 from . import sections
 from .models import ResearchDossierInput
@@ -283,6 +285,7 @@ def write_research_workbook(
     _table_sheet(wb, "产品迭代", _ITERATION, input.iteration.segments if input.iteration else None)
     _iteration_notes(wb, input)
     _external_sheets(wb, input)
+    _deep_dive_sheet(wb, input)
     _quality_sheet(wb, input)
     _missing_sheet(wb, input)
     _sources_sheet(wb, input)
@@ -410,6 +413,23 @@ def _external_sheets(wb: Any, input: ResearchDossierInput) -> None:
             _put(ws, start, 1, "说明", bold=True)
             for offset, note in enumerate(table.notes, start=1):
                 _put(ws, start + offset, 1, note)
+
+
+def _deep_dive_sheet(wb: Any, input: ResearchDossierInput) -> None:
+    """深挖研究:仅当执行过 deep-dive(input.deep_dive 不为 None)时追加一张工作表,每个模块一组「事实 + 证据状态」。"""
+    if input.deep_dive is None:
+        return
+    rows: list[tuple[str, ...]] = []
+    for section in input.deep_dive["report"]["sections"]:
+        for fact in section["facts"]:
+            rows.append((section["title"], "事实", fact["label"], str(fact["value"]), fact["unit"] or "-",
+                         "、".join(fact["evidence_ids"]) or "-", fact["note"] or "-"))
+        for slot in section["slots"]:
+            rows.append((section["title"], "证据状态", slot["label"], "已登记" if slot["status"] == "present" else "缺失",
+                         "-", "-", slot["detail"] or "-"))
+    headers = ("模块", "类型", "项目", "数值/状态", "单位", "证据 ID", "备注")
+    columns = [_Col(header, lambda row, i=i: row[i], "text") for i, header in enumerate(headers)]
+    _table_sheet(wb, "深挖_汇总", columns, tuple(rows))
 
 
 def _approval_summary(history: Sequence[dict[str, object]]) -> str:
@@ -561,13 +581,23 @@ def _put(ws: Any, row: int, col: int, value: object, *, kind: str = "text", bold
         cell.font = Font(bold=True)
 
 
+_MODIFIED_TAG = re.compile(rb"(<dcterms:modified[^>]*>)[^<]*(</dcterms:modified>)")
+
+
 def _normalize_zip(raw: bytes) -> bytes:
-    """重写 zip 条目时间戳,使同输入得到字节相同的 xlsx。"""
+    """重写 zip 条目时间戳,使同输入得到字节相同的 xlsx。
+
+    openpyxl 保存时会把 core.xml 的 modified 覆盖成当前时间(忽略我们设置的固定值),
+    不在这里还原的话,两次写入跨秒就会得到不同字节。
+    """
     out = BytesIO()
     with ZipFile(BytesIO(raw)) as src, ZipFile(out, "w", ZIP_DEFLATED) as dst:
         for name in src.namelist():
             info = ZipInfo(name, date_time=_FIXED_ZIP_TIME)
             info.compress_type = ZIP_DEFLATED
             info.external_attr = 0o600 << 16
-            dst.writestr(info, src.read(name))
+            data = src.read(name)
+            if name == "docProps/core.xml":
+                data = _MODIFIED_TAG.sub(rb"\g<1>" + _FIXED_DATETIME.strftime("%Y-%m-%dT%H:%M:%SZ").encode() + rb"\g<2>", data)
+            dst.writestr(info, data)
     return out.getvalue()

@@ -90,13 +90,16 @@ $PY $ENGINE/scripts/run_research.py dossier --project <ID> --output $ENGINE/runt
 ```bash
 # 登记外部证据(可在 ingest 之后任意时刻、多次执行;同 kind 追加为带序号的条目,不覆盖历史)
 $PY $ENGINE/scripts/run_research.py import-evidence --project <ID> \
-    --kind trends|report-excerpts|tiktok-units|patents|patent-search-log|ads|big-brand|offsite|cross-category \
+    --kind trends|report-excerpts|tiktok-units|patents|patent-search-log|ads|big-brand|offsite|cross-category|keywords|scenarios|voc \
     --file <文件> [--meta key=value ...]
   → 原文件按 SHA256 快照到 raw/,结构化结果存 external/<kind>.json,登记 external/index.json
   → 校验失败(缺来源、含 GMV 字段、专利无检索日志…)原样输出库报错,不改任何状态
   → 必填 --meta:trends = geo timeframe source_name source_url as_of;tiktok-units = source_name source_url as_of
     (可选 low_growth high_growth);big-brand = brand product_type source_name retrieved_at(可选 aba_rank threshold url as_of);
-    cross-category = source_name retrieved_at(可选 url as_of brand);其余 kind 的来源列在文件内
+    cross-category = source_name retrieved_at(可选 url as_of brand);keywords / scenarios / voc = source_name retrieved_at scope(可选 url);其余 kind 的来源列在文件内
+  → keywords 列:keyword[,search_volume,aba_rank,month,segment];scenarios 列:scenario[,mention_count,segment,example];
+    voc 列:theme,sentiment(positive|negative|neutral 或 正面|负面|中性),excerpt[,platform,asin,rating,url]。
+    主题/情感/场景/细分标签由导入文件(人工或外部 AI 标注)提供,系统只做计数与占比;缺搜索量/提及数不当 0,不进份额分母;scope(取数范围)必填
   → patent-search-log 要在 patents 之后导入才能把检索命中挂到专利记录上
 
 # analyze 之后的可选预测(预测值=外推,假设随结果登记;库拒绝缺覆盖率的跨口径外推)
@@ -117,6 +120,26 @@ $PY $ENGINE/scripts/run_research.py export-table --project <ID> --table 1|2|3 --
 # 用户在表格软件中修改(不得增删列;表1 不能新增行,销量缺失不得当 0;表3 标签须在体系内;卖点用 || 分隔)
 $PY $ENGINE/scripts/run_research.py import-table --project <ID> --table 1|2|3 --file <修改后文件>
 ```
+深挖执行(T2-8;**派生工件,不是检查点**,只汇总事实与证据缺口,不出商业结论):
+
+```bash
+# 执行人工确认路线展开的模块;--modules 显式追加(seasonality external_channels segment_deep_dive replacement_research
+#   new_products vc_sc_comparison trend_sustainability google_trends brand_deep_dive advertising_research keyword_research scenario_research voc_research)
+$PY $ENGINE/scripts/run_research.py deep-dive --project <ID> [--modules a,b]
+```
+每个模块给出带证据 ID 的事实表 + 证据槽位(已登记/缺失)+ 局限说明;`new_product_brands` 等当前输入没有对应维度的模块进「无法自动执行」清单,不会编造。补证据(import-evidence)或重新 analyze 后要重跑 deep-dive,否则 dossier 会因深挖过期而拒绝导出;缺口照报告原样转述,不补数、不替人解读「为什么」。
+
+历史知识库(T5,R01;本地 SQLite,默认 runtime/knowledge.db,可用 `--kb` 或 RESEARCH_KB_PATH 指定):
+
+```bash
+$PY $ENGINE/scripts/run_research.py kb-archive --project <ID> [--note "人工备注"]   # 仅限已出 dossier 且分类已人工确认的项目;同内容幂等,变化新增版本
+$PY $ENGINE/scripts/run_research.py kb-search --query "ice maker" [--marketplace US]
+$PY $ENGINE/scripts/run_research.py kb-labels --query "ice maker"                  # 历史分类体系,仅供参考
+$PY $ENGINE/scripts/run_research.py kb-lookup --asin B0XXXX [--asin ...]            # 历史上被人工确认过的 ASIN 分类
+$PY $ENGINE/scripts/run_research.py kb-show --project <ID> [--full]
+```
+历史标签不会自动写入新项目:要复用须在新项目 `classify --label/--rule` 显式采用并经 classification_review 人工确认。知识库不对 Web 多用户开放(跨项目共享会破坏项目隔离)。
+
 校验失败不改任何状态;成功后旧审批立即失效:表1 → 重新请求 data_review;表3 → 重新请求 classification_review;表2 → 重新请求 enrichment_review(保留机器补齐,人工修改优先),确认后再 classify。只有重新确认的版本才会进入下游。
 
 验收对账(只读;参考表列 key,expected[,tolerance_abs,tolerance_pct],key 形如 market.2026-01.total_sales / point_rank.2026-01.3.sales / new_products.summary.retention_rate_pct):

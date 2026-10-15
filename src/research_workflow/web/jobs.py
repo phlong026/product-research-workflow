@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from research_workflow.domain.models import utc_now_iso
 
@@ -30,7 +30,7 @@ ASIN = r"^[A-Za-z0-9]{1,20}$"
 COMMAND_TIMEOUTS = {"ingest": 3600, "discover-nodes": 900, "enrich": 1800, "classify": 1800, "analyze": 900,
                     "resolve": 300, "dossier": 600, "export-table": 120, "import-table": 300,
                     "import-evidence": 300, "build-market-forecast": 300, "build-cross-channel": 300,
-                    "reconcile": 300}
+                    "reconcile": 300, "deep-dive": 300}
 
 
 class _Params(BaseModel):
@@ -90,7 +90,7 @@ class DossierParams(_Params):
     pass
 
 
-EVIDENCE_KINDS = "^(trends|report-excerpts|tiktok-units|patents|patent-search-log|ads|big-brand|offsite|cross-category)$"
+EVIDENCE_KINDS = "^(trends|report-excerpts|tiktok-units|patents|patent-search-log|ads|big-brand|offsite|cross-category|keywords|scenarios|voc)$"
 
 
 class ImportEvidenceParams(_Params):
@@ -125,6 +125,19 @@ class ImportTableParams(_Params):
     upload: str = Field(min_length=1, max_length=64)
 
 
+class DeepDiveParams(_Params):
+    # 缺省只执行人工确认路线展开的模块;modules 是显式追加(模块名由引擎校验,未知名报错)
+    modules: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("modules")
+    @classmethod
+    def _module_names(cls, value: list[str]) -> list[str]:
+        for item in value:
+            if not re.fullmatch(r"[a-z_]{1,40}", item):
+                raise ValueError(f"非法模块名: {item!r}")
+        return value
+
+
 class ReconcileParams(_Params):
     upload: str = Field(min_length=1, max_length=64)
 
@@ -134,7 +147,7 @@ PARAM_MODELS: dict[str, type[_Params]] = {
     "resolve": ResolveParams, "analyze": AnalyzeParams, "dossier": DossierParams,
     "export-table": ExportTableParams, "import-table": ImportTableParams,
     "import-evidence": ImportEvidenceParams, "build-market-forecast": MarketForecastParams,
-    "build-cross-channel": CrossChannelParams, "reconcile": ReconcileParams,
+    "build-cross-channel": CrossChannelParams, "reconcile": ReconcileParams, "deep-dive": DeepDiveParams,
 }
 
 
@@ -249,6 +262,9 @@ def build_argv(command: str, params: _Params, *, project_id: str, project_dir: P
         argv += [f"--table={p['table']}", f"--output={exports / ('table' + str(p['table']) + '.csv')}"]
     elif command == "import-table":
         argv += [f"--table={p['table']}", f"--file={upload_path(p['upload'])}"]
+    elif command == "deep-dive":
+        if p["modules"]:
+            argv.append(f"--modules={','.join(p['modules'])}")
     elif command == "reconcile":
         exports = project_dir / "exports"
         exports.mkdir(parents=True, exist_ok=True)
