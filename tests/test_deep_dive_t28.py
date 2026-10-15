@@ -108,6 +108,31 @@ def test_demand_modules_cite_registered_scope() -> None:
     assert all(s.status == "missing" for sec in empty.sections for s in sec.slots)
 
 
+def _kw_entry(seq: int, pairs: list[tuple[str, float | None]]) -> dict:
+    table = [{"keyword": k, "latest_search_volume": v, "latest_month": "2026-09", "change_pct": None} for k, v in pairs]
+    evidence = {"source_name": f"S{seq}", "retrieved_at": "2026-10-01", "scope": "US"}
+    return {"seq": seq, "record_count": len(pairs), "data": {"evidence": evidence, "summary": {"table": table}}}
+
+
+def test_demand_rows_from_several_imports_are_sorted_globally_before_the_cap() -> None:
+    first = _kw_entry(1, [(f"low{i:02d}", float(i + 1)) for i in range(30)])  # 第一次导入:30 个小词
+    second = _kw_entry(2, [("big", 999999.0), ("unknown", None)])  # 第二次导入:最大词 + 缺搜索量的词
+    section = _run(Inputs(_market(), external={"keywords": [first, second]}), "keyword_research").sections[0]
+    labels = [f.label for f in section.facts]
+    assert labels[0] == "big" and len(labels) == 30
+    assert "unknown" not in labels  # 缺值排最后,先被截掉
+    assert any("共 32 行" in text for text in section.limitations)
+
+
+def test_scenario_with_unknown_mentions_is_not_reported_as_zero() -> None:
+    evidence = {"source_name": "S", "retrieved_at": "2026-10-01", "scope": "US"}
+    rows = [{"scenario": "party", "mentions": None, "share_pct": None}, {"scenario": "camp", "mentions": 4.0, "share_pct": 100.0}]
+    entry = {"seq": 1, "record_count": 2, "data": {"evidence": evidence, "summary": {"table": rows}}}
+    section = _run(Inputs(_market(), external={"scenarios": [entry]}), "scenario_research").sections[0]
+    values = {f.label: f.value for f in section.facts}
+    assert values["camp"].startswith("提及 4") and "未知" in values["party"] and "提及 0" not in values["party"]
+
+
 def test_unknown_module_is_an_error_and_unsupported_is_reported_not_faked() -> None:
     with pytest.raises(ValueError, match="未知深挖模块"):
         _run(Inputs(_market()), "make_money")

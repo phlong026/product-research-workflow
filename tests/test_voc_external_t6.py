@@ -65,7 +65,11 @@ def test_scenarios_share_excludes_rows_without_counts(tmp_path) -> None:
     table = {r["scenario"]: r for r in summary["table"]}
     assert summary["mentions_total"] == 50
     assert table["camping"]["share_pct"] == 80.0 and table["office"]["share_pct"] == 20.0
-    assert table["party"]["missing_count_rows"] == 1 and table["party"]["mentions"] == 0
+    # 一个场景的所有行都缺提及数:保持未知(None),不能变成「0 次提及」
+    assert table["party"]["missing_count_rows"] == 1 and table["party"]["mentions"] is None and table["party"]["share_pct"] is None
+    assert [r["scenario"] for r in summary["table"]][-1] == "party"  # 未知排最后
+    partial = summarize_scenarios(load_scenario_rows(_write(tmp_path, "p.csv", "scenario,mention_count\nx,\nx,5\n")))
+    assert partial["table"][0]["mentions"] == 5 and partial["table"][0]["missing_count_rows"] == 1
 
 
 def test_voc_counts_by_theme_and_validates_sentiment_and_rating(tmp_path) -> None:

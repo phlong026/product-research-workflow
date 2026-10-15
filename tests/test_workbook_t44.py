@@ -207,6 +207,16 @@ def test_source_relative_path_falls_back_to_name(tmp_path):
     assert sheet_rows(wb["来源与哈希"])[1][2] == "seller_sprite.xlsx"
 
 
+def test_core_properties_modified_time_is_pinned_not_wall_clock(tmp_path):
+    """openpyxl 保存时会写入当前时间;不还原的话两次写入跨秒就字节不同(偶发失败的根因)。"""
+    import zipfile
+
+    path = write_research_workbook(full_input(tmp_path), tmp_path / "w.xlsx", generated_at="2026-02-01")
+    core = zipfile.ZipFile(path).read("docProps/core.xml").decode("utf-8")
+    assert '<dcterms:modified xsi:type="dcterms:W3CDTF">2000-01-01T00:00:00Z</dcterms:modified>' in core
+    assert '<dcterms:created xsi:type="dcterms:W3CDTF">2000-01-01T00:00:00Z</dcterms:created>' in core
+
+
 def test_workbook_is_deterministic(tmp_path):
     dossier = full_input(tmp_path)
     a = write_research_workbook(dossier, tmp_path / "a.xlsx", generated_at="2026-02-01")

@@ -252,6 +252,10 @@ def _demand(kind: str, module: str, title: str, summary_label: str):
         for entry in inputs.entries(kind):
             for row in entry["data"]["summary"]["table"]:
                 rows.append((row, entry["data"]["evidence"], entry["seq"]))
+        # 多次导入合并后按该类别的影响量级全局排序(未知排最后),再截断:后一次导入的大项不能被前一次的小项挤掉
+        impact = {"keywords": "latest_search_volume", "scenarios": "mentions", "voc": "excerpts"}[kind]
+        label_key = {"keywords": "keyword", "scenarios": "scenario", "voc": "theme"}[kind]
+        rows.sort(key=lambda item: (item[0][impact] is None, -(item[0][impact] or 0), item[2], str(item[0][label_key]).lower()))
         for row, evidence, seq in _cap(rows, limitations):
             ids = (f"external:{kind}:{seq}",)
             if kind == "keywords":
@@ -259,7 +263,7 @@ def _demand(kind: str, module: str, title: str, summary_label: str):
                         (f";较上期 {row['change_pct']:+.2f}%" if row["change_pct"] is not None else "")
                 label = row["keyword"]
             elif kind == "scenarios":
-                value = f"提及 {row['mentions']:g}" + (f"(占 {row['share_pct']:.2f}%)" if row["share_pct"] is not None else ";缺提及数")
+                value = f"提及 {row['mentions']:g}(占 {row['share_pct']:.2f}%)" if row["mentions"] is not None else "缺提及数(未知,不是 0)"
                 label = row["scenario"]
             else:
                 value = f"{row['excerpts']} 条(占 {row['share_pct']:.2f}%);正面 {row['positive']} / 负面 {row['negative']} / 中性 {row['neutral']}"

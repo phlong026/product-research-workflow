@@ -187,27 +187,29 @@ def summarize_keywords(rows: list[KeywordRow]) -> dict[str, Any]:
 
 
 def summarize_scenarios(rows: list[ScenarioRow]) -> dict[str, Any]:
+    """mentions 在该场景至少有一个观测到的提及数之前保持 None:未知不是 0。"""
     by_scenario: dict[str, dict[str, Any]] = {}
     for row in rows:
         item = by_scenario.setdefault(row.scenario.strip().lower(), {
-            "scenario": row.scenario.strip(), "mentions": 0.0, "rows": 0, "missing_count_rows": 0, "segments": set(), "example": None,
+            "scenario": row.scenario.strip(), "mentions": None, "rows": 0, "missing_count_rows": 0, "segments": set(), "example": None,
         })
         item["rows"] += 1
         if row.mention_count is None:
             item["missing_count_rows"] += 1
         else:
-            item["mentions"] += row.mention_count
+            item["mentions"] = (item["mentions"] or 0.0) + row.mention_count
         if row.segment:
             item["segments"].add(row.segment)
         item["example"] = item["example"] or row.example
-    total = sum(item["mentions"] for item in by_scenario.values())
+    total = sum(item["mentions"] for item in by_scenario.values() if item["mentions"] is not None)
     table = [
-        {"scenario": item["scenario"], "mentions": item["mentions"], "share_pct": _share(item["mentions"], total),
+        {"scenario": item["scenario"], "mentions": item["mentions"],
+         "share_pct": _share(item["mentions"], total) if item["mentions"] is not None else None,
          "rows": item["rows"], "missing_count_rows": item["missing_count_rows"],
          "segments": sorted(item["segments"]), "example": item["example"]}
         for item in by_scenario.values()
     ]
-    table.sort(key=lambda r: (-r["mentions"], r["scenario"].lower()))
+    table.sort(key=lambda r: (r["mentions"] is None, -(r["mentions"] or 0), r["scenario"].lower()))
     return {"scenario_count": len(table), "mentions_total": total, "table": table, "notes": list(NOTES)}
 
 

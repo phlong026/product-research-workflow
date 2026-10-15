@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
@@ -580,13 +581,23 @@ def _put(ws: Any, row: int, col: int, value: object, *, kind: str = "text", bold
         cell.font = Font(bold=True)
 
 
+_MODIFIED_TAG = re.compile(rb"(<dcterms:modified[^>]*>)[^<]*(</dcterms:modified>)")
+
+
 def _normalize_zip(raw: bytes) -> bytes:
-    """重写 zip 条目时间戳,使同输入得到字节相同的 xlsx。"""
+    """重写 zip 条目时间戳,使同输入得到字节相同的 xlsx。
+
+    openpyxl 保存时会把 core.xml 的 modified 覆盖成当前时间(忽略我们设置的固定值),
+    不在这里还原的话,两次写入跨秒就会得到不同字节。
+    """
     out = BytesIO()
     with ZipFile(BytesIO(raw)) as src, ZipFile(out, "w", ZIP_DEFLATED) as dst:
         for name in src.namelist():
             info = ZipInfo(name, date_time=_FIXED_ZIP_TIME)
             info.compress_type = ZIP_DEFLATED
             info.external_attr = 0o600 << 16
-            dst.writestr(info, src.read(name))
+            data = src.read(name)
+            if name == "docProps/core.xml":
+                data = _MODIFIED_TAG.sub(rb"\g<1>" + _FIXED_DATETIME.strftime("%Y-%m-%dT%H:%M:%SZ").encode() + rb"\g<2>", data)
+            dst.writestr(info, data)
     return out.getvalue()
