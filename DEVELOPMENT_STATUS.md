@@ -42,6 +42,7 @@
 | 新品阈值无内置默认 | ✅🔌 | 推起/留存阈值缺任一项则不计算新品指标并披露原因(库层 `NewProductConfig` 仍保留 250 供单元测试) |
 | T5 历史知识库(R01) | ✅🔌(本地版) | `kb-archive/kb-search/kb-labels/kb-lookup/kb-show`:SQLite 归档已完成项目的分类体系、逐 ASIN 标签、指标摘要、阈值、审批、证据索引与人工备注;检索/历史标签只作参考,复用须重新经 classification_review。**未做向量语义检索;不对 Web 开放** |
 | T6 关键词/场景/VOC | ✅🔌(证据登记版) | `import-evidence --kind keywords|scenarios|voc`:登记并确定性汇总(scope 必填、缺值不当 0),接入 dossier 与 deep-dive 的 `keyword_research/scenario_research/voc_research`。**系统不自动抓取评论/搜索量,标签由输入提供** |
+| 客户安装包(Windows) | ✅(Linux 上验证) | `python packaging/build_customer_package.py` → `dist/xuanpin-research-<版本>-windows.zip`(+ .sha256):`install.bat/ps1`(装 uv、Python 3.12、按锁文件装依赖)、`start.bat`(只监听本机)、`check.bat`、客户 README/操作手册/给 Codex 的安装说明。已在 Linux 上把解压后的包完整跑通(uv sync→安装配置→启动→登录→建项目→上传→三个检查点→资料包下载)。**`.bat`/`.ps1` 本身没有在 Windows 上执行过**(此环境无 Windows/PowerShell),首次在客户机上请先小范围试装 |
 | T6 飞书机器人(R02) | ⏳ | 未开始(需要飞书应用凭据与外网放行,当前无法联调) |
 
 ## 后续插件化，不阻塞核心 Research Workflow

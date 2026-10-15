@@ -8,6 +8,14 @@ Amazon/跨境选品的 **Research Workflow Engine**。当前可运行受控单�
 
 **差距整改(分支 `feat/phase1-data-chain`，尚未合并)**：在上述基础上新增节点发现与多节点采集、近三年月份窗口、三值跨父体去重、地区/卖点补齐、可选 LLM 分类(歧义标待人工)、三张表人工校正协议、新品留存率原文口径与新品队列、单点名次矩阵与卖家口径集中度、外部证据登记(Trends/TikTok/专利/广告/大品牌/站外，不联网)、综合 Excel 工作簿，以及**多人 Web 研究工作台**(`python -m research_workflow.web serve`，见 [Web 工作台](docs/WEB_WORKBENCH.md))。逐项进度见 [DEVELOPMENT_STATUS](DEVELOPMENT_STATUS.md)，待业务拍板的口径见 [口径确认单](docs/口径确认单.md)。以上均用合成数据离线验证，**未经真实供应商联调与业务样本对账**；Web 鉴权代码上线前须经人工安全评审。
 
+## 客户安装包(Windows)
+
+```bash
+python packaging/build_customer_package.py   # → dist/xuanpin-research-<版本>-windows.zip 与 .sha256
+```
+
+安装包只含引擎源码、锁文件、安装/启动脚本与客户文档,不含测试、内部文档、真实密钥;客户解压后双击 `install.bat`(或让 Codex 按 `INSTALL_FOR_CODEX.md` 执行)再双击 `start.bat` 即可使用浏览器工作台。构建脚本发现疑似密钥会拒绝打包。
+
 ## 模块实现
 
 以下模块具有实现与离线测试，模块存在不代表所有外部能力已接通：

@@ -68,6 +68,7 @@ RESEARCH_DB_PATH=runtime/api-experiment.db .venv/bin/python -m uvicorn research_
 | `voc_external/` | T6 | 关键词/场景/VOC 外部证据:纯确定性汇总(标签来自输入,不调模型),scope 必填,缺值不当 0;经 `import-evidence` 接入 |
 | `deep_dive/` | T2-8 | 证据驱动深挖:把人工确认路线展开成模块,汇总已算指标+已登记证据,逐项标出证据缺口;`deep_dive.json` 绑定输入哈希,过期则 dossier 拒绝 |
 | `knowledge/` | T5(R01) | 本地 SQLite 历史知识库:归档已完成项目、检索、历史标签参考、ASIN 对照;只作参考,不自动分类 |
+| `packaging/` + `scripts/install_customer.py` | 交付 | 客户安装包(Windows,Web 工作台):`build_customer_package.py` 白名单打包(不含测试/fixtures/内部文档/真实配置,含密钥扫描,可复现),`templates/` 是 install.bat/ps1、start.bat、客户文档;`install_customer.py` 做安装后配置(.env 骨架、管理员账号、冒烟启动、体检,不回显凭据) |
 | `reconcile.py` | 验收 | 指标与人工结果逐项对账(`reconcile` 命令,缺失不当 0) |
 | `dossier/` | T11 | JSON+CSV+Markdown+离线SVG HTML+SHA256 manifest |
 | `external_ingest.py` + `dossier/external.py` | T2-3~T2-7/T3-6~T3-9 | 外部证据登记(`import-evidence`,落 `external/`,索引哈希,**非检查点**)、预测/跨渠道接线、dossier「外部证据与预测」章节与 `外部_*` 工作表 |
