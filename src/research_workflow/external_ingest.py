@@ -55,6 +55,14 @@ from research_workflow.market_external import (
     trends_to_evidence,
 )
 from research_workflow.market_external.trends import GoogleTrendsExport, TrendSeries
+from research_workflow.voc_external import (
+    load_keyword_rows,
+    load_scenario_rows,
+    load_voc_rows,
+    summarize_keywords,
+    summarize_scenarios,
+    summarize_voc,
+)
 
 EXTERNAL_DIR = "external"
 INDEX_NAME = "index.json"
@@ -62,7 +70,7 @@ FORECAST_NAME = "forecast.json"
 CROSS_CHANNEL_NAME = "cross_channel.json"
 KINDS = (
     "trends", "report-excerpts", "tiktok-units", "patents", "patent-search-log",
-    "ads", "big-brand", "offsite", "cross-category",
+    "ads", "big-brand", "offsite", "cross-category", "keywords", "scenarios", "voc",
 )
 _NONE: tuple[str, ...] = ()
 # kind -> (必填 meta, 可选 meta)
@@ -76,6 +84,10 @@ META_SPEC: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "big-brand": (("brand", "product_type", "source_name", "retrieved_at"), ("aba_rank", "threshold", "url", "as_of")),
     "offsite": (_NONE, _NONE),
     "cross-category": (("source_name", "retrieved_at"), ("url", "as_of", "brand")),
+    # T6:取数范围(scope)必填——样本不是总体,缺范围的数字没法被人复核
+    "keywords": (("source_name", "retrieved_at", "scope"), ("url",)),
+    "scenarios": (("source_name", "retrieved_at", "scope"), ("url",)),
+    "voc": (("source_name", "retrieved_at", "scope"), ("url",)),
 }
 
 
@@ -296,10 +308,38 @@ def _parse_cross_category(path: Path, meta: dict[str, str], **_: Any):
     return data, len(asins), f"{data['category_count']} 个类目 / {len(asins)} 个 ASIN"
 
 
+def _demand_entry(path: Path, meta: dict[str, str], rows: list[Any], summary: dict[str, Any]) -> dict[str, Any]:
+    _iso(meta["retrieved_at"], "retrieved_at")
+    return {"records": [r.to_dict() for r in rows], "summary": summary,
+            "evidence": {**_evidence_ref(path, meta).to_dict(), "scope": meta["scope"]}}
+
+
+def _parse_keywords(path: Path, meta: dict[str, str], **_: Any):
+    rows = load_keyword_rows(path)
+    summary = summarize_keywords(rows)
+    return (_demand_entry(path, meta, rows, summary), len(rows),
+            f"{summary['keyword_count']} 个关键词(缺搜索量 {summary['missing_volume_keywords']});范围: {meta['scope']}")
+
+
+def _parse_scenarios(path: Path, meta: dict[str, str], **_: Any):
+    rows = load_scenario_rows(path)
+    summary = summarize_scenarios(rows)
+    return (_demand_entry(path, meta, rows, summary), len(rows),
+            f"{summary['scenario_count']} 个场景 / 提及合计 {summary['mentions_total']:g};范围: {meta['scope']}")
+
+
+def _parse_voc(path: Path, meta: dict[str, str], **_: Any):
+    rows = load_voc_rows(path)
+    summary = summarize_voc(rows)
+    return (_demand_entry(path, meta, rows, summary), len(rows),
+            f"{summary['excerpt_count']} 条评论摘录 / {summary['theme_count']} 个主题;范围: {meta['scope']}")
+
+
 _PARSERS = {
     "trends": _parse_trends, "report-excerpts": _parse_report_excerpts, "tiktok-units": _parse_tiktok,
     "patents": _parse_patents, "patent-search-log": _parse_patent_logs, "ads": _parse_ads,
     "big-brand": _parse_big_brand, "offsite": _parse_offsite, "cross-category": _parse_cross_category,
+    "keywords": _parse_keywords, "scenarios": _parse_scenarios, "voc": _parse_voc,
 }
 
 

@@ -77,6 +77,28 @@ CROSS_CATEGORY_CSV = (
     "C1,kitchen,2024-01-10,120\nC2,kitchen,2025-05-10,80\nC3,garden,2025-07-01,\n"
 )
 
+DEMAND_META = ["source_name=Helium10 Magnet", "retrieved_at=2026-10-01", "scope=US 站 ice maker 相关词 2026-08..2026-09",
+               "url=https://example.com/kw"]
+KEYWORDS_CSV = (
+    "keyword,search_volume,aba_rank,month,segment\n"
+    "nugget ice maker,52000,120,2026-08,nugget\n"
+    "nugget ice maker,60000,98,2026-09,nugget\n"
+    "bullet ice maker,30000,300,2026-09,bullet\n"
+    "clear ice maker,,,2026-09,clear\n"
+)
+SCENARIOS_CSV = (
+    "scenario,mention_count,segment,example\n"
+    "camping,40,bullet,bring to the lake\n"
+    "office,10,nugget,\n"
+    "party,,nugget,\n"
+)
+VOC_CSV = (
+    "theme,sentiment,excerpt,platform,asin,rating,url\n"
+    "noise,negative,too loud at night,Amazon,N1,2,https://example.com/r/1\n"
+    "noise,negative,loud compressor,Amazon,N1,1,https://example.com/r/2\n"
+    "ice texture,positive,love the crunchy ice,Reddit,,5,https://example.com/r/3\n"
+)
+
 # kind -> (文件名, 内容, meta)
 SAMPLES: dict[str, tuple[str, str, list[str]]] = {
     "trends": ("trends.csv", TRENDS_CSV, TRENDS_META),
@@ -88,6 +110,9 @@ SAMPLES: dict[str, tuple[str, str, list[str]]] = {
     "big-brand": ("brand_asins.csv", BRAND_ASINS_CSV, BRAND_META),
     "offsite": ("offsite.csv", OFFSITE_CSV, []),
     "cross-category": ("cross_category.csv", CROSS_CATEGORY_CSV, CROSS_META),
+    "keywords": ("keywords.csv", KEYWORDS_CSV, DEMAND_META),
+    "scenarios": ("scenarios.csv", SCENARIOS_CSV, DEMAND_META),
+    "voc": ("voc.csv", VOC_CSV, DEMAND_META),
 }
 ALL_KINDS = list(SAMPLES)
 

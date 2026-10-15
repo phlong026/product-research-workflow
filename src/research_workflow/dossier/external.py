@@ -30,6 +30,7 @@ KIND_LABELS = {
     "trends": "Google Trends 导出", "report-excerpts": "研报摘录", "tiktok-units": "TikTok 渠道台数",
     "patents": "专利记录", "patent-search-log": "专利检索日志", "ads": "广告/流量/评价/CPC 证据",
     "big-brand": "大品牌核查", "offsite": "站外证据", "cross-category": "跨类目 ASIN",
+    "keywords": "关键词搜索量", "scenarios": "使用场景", "voc": "用户评论(VOC)主题",
 }
 KINDS = tuple(KIND_LABELS)
 _SCOPE_LABELS = {"top_sample": "Top 样本", "amazon_channel": "Amazon 渠道", "full_market": "全市场"}
@@ -442,9 +443,64 @@ def _cross_category(ext: dict[str, Any]) -> ExtTable:
                     notes=(*notes, "卖家成色(已推爆/待推爆/持续上新)由人工判断,此处仅汇总事实"))
 
 
+def _demand_source(d: dict[str, Any]) -> tuple[object, ...]:
+    ev = d["evidence"]
+    return (ev["source_name"], ev["retrieved_at"], ev.get("scope"), _evidence_locator(ev))
+
+
+_DEMAND_SOURCE_HEADERS = ("来源", "取数日期", "取数范围", "链接/文件")
+_DEMAND_SOURCE_KINDS = ("text",) * 4
+
+
+def _keywords(ext: dict[str, Any]) -> ExtTable:
+    headers = ("关键词", "细分(导入标注)", "最新月份", "最新搜索量", "上期月份", "上期搜索量", "环比%", "已观测月数", *_DEMAND_SOURCE_HEADERS)
+    kinds = ("text", "text", "text", "num", "text", "num", "chg", "int", *_DEMAND_SOURCE_KINDS)
+    entries = _entries(ext, "keywords")
+    if not entries:
+        return ExtTable("外部_关键词", "关键词搜索量", headers, kinds, None)
+    rows = tuple(
+        (r["keyword"], r["segment"], r["latest_month"], r["latest_search_volume"], r["previous_month"],
+         r["previous_search_volume"], r["change_pct"], r["months_observed"], *_demand_source(d))
+        for d in (e["data"] for e in entries) for r in d["summary"]["table"]
+    )
+    notes = tuple(dict.fromkeys(n for e in entries for n in e["data"]["summary"]["notes"]))
+    return ExtTable("外部_关键词", "关键词搜索量", headers, kinds, rows, notes=notes)
+
+
+def _scenarios(ext: dict[str, Any]) -> ExtTable:
+    headers = ("场景", "提及数", "占比%", "缺提及数行数", "涉及细分", "示例", *_DEMAND_SOURCE_HEADERS)
+    kinds = ("text", "num", "pct", "int", "text", "text", *_DEMAND_SOURCE_KINDS)
+    entries = _entries(ext, "scenarios")
+    if not entries:
+        return ExtTable("外部_场景", "使用场景", headers, kinds, None)
+    rows = tuple(
+        (r["scenario"], r["mentions"], r["share_pct"], r["missing_count_rows"], "、".join(r["segments"]) or None,
+         r["example"], *_demand_source(d))
+        for d in (e["data"] for e in entries) for r in d["summary"]["table"]
+    )
+    notes = tuple(dict.fromkeys(n for e in entries for n in e["data"]["summary"]["notes"]))
+    return ExtTable("外部_场景", "使用场景", headers, kinds, rows, notes=notes)
+
+
+def _voc(ext: dict[str, Any]) -> ExtTable:
+    headers = ("主题", "摘录条数", "占比%", "正面", "负面", "中性", "负面占比%", "代表摘录(情感: 原文 | 出处)", *_DEMAND_SOURCE_HEADERS)
+    kinds = ("text", "int", "pct", "int", "int", "int", "pct", "text", *_DEMAND_SOURCE_KINDS)
+    entries = _entries(ext, "voc")
+    if not entries:
+        return ExtTable("外部_VOC", "用户评论(VOC)主题", headers, kinds, None)
+    rows = tuple(
+        (r["theme"], r["excerpts"], r["share_pct"], r["positive"], r["negative"], r["neutral"], r["negative_share_pct"],
+         "；".join(f"{x['sentiment']}: {x['excerpt']} | {x['locator'] or x['asin'] or x['platform'] or '-'}" for x in r["examples"]),
+         *_demand_source(d))
+        for d in (e["data"] for e in entries) for r in d["summary"]["table"]
+    )
+    notes = tuple(dict.fromkeys(n for e in entries for n in e["data"]["summary"]["notes"]))
+    return ExtTable("外部_VOC", "用户评论(VOC)主题", headers, kinds, rows, notes=notes)
+
+
 def external_tables(ext: dict[str, Any]) -> list[ExtTable]:
     builders = (_trends, _excerpts, _tiktok_units, _tiktok_cagr, _tiktok_projection, _forecast, _cross_channel,
-                _patent_logs, _patents, _ads, _big_brand, _offsite, _cross_category)
+                _patent_logs, _patents, _ads, _big_brand, _offsite, _cross_category, _keywords, _scenarios, _voc)
     return [build(ext) for build in builders]
 
 
