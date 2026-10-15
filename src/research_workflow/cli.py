@@ -61,6 +61,7 @@ from research_workflow.domain import ProjectStatus, StepStatus
 from research_workflow.domain.models import utc_now_iso
 from research_workflow import external_ingest
 from research_workflow.deep_dive import SUPPORTED_MODULES
+from research_workflow.knowledge import KnowledgeBase, build_payload as build_kb_payload
 from research_workflow.deep_dive import project as deep_dive_project
 from research_workflow.dossier import (
     ResearchDossierGenerator,
@@ -1327,6 +1328,79 @@ def cmd_build_cross_channel(args: argparse.Namespace) -> None:
     })
 
 
+# --- T5 历史知识库(R01):本地归档与检索;只归档已完成且分类已人工确认的项目 ---
+
+def _kb(args: argparse.Namespace) -> KnowledgeBase:
+    return KnowledgeBase(args.kb)
+
+
+def cmd_kb_archive(args: argparse.Namespace) -> None:
+    svc = _service(args)
+    project = svc.store.get_project(args.project)
+    if project is None:
+        raise KeyError(f"Unknown project: {args.project}")
+    if project.status != ProjectStatus.COMPLETED:
+        raise ValueError("只归档已完成的项目(已生成 dossier);先完成研究并导出资料包")
+    pdir = _project_dir(args, args.project)
+    envelope = _require_file(pdir / "classification.json", "缺少 classification.json")
+    if not envelope["batch"].get("approved"):
+        raise ValueError("分类尚未人工确认,不归档")
+    external = external_ingest.load_external(pdir)  # 登记证据被篡改/过期时拒绝归档
+    state = svc.store.get_state(args.project)
+    approvals = []
+    for step, checkpoint_id in sorted(state.get("approved_checkpoints", {}).items()):
+        checkpoint = svc.store.get_checkpoint(checkpoint_id)
+        approvals.append({"step": step, "checkpoint_id": checkpoint_id, "status": checkpoint.status.value if checkpoint else "missing"})
+    deep_dive = deep_dive_project.load_for_dossier(pdir)
+    optional = lambda name: _load_json(pdir / name) if (pdir / name).is_file() else None  # noqa: E731
+    payload = build_kb_payload(
+        project={"project_id": project.id, "product": project.product, "marketplace": project.marketplace,
+                 "primary_keyword": project.primary_keyword, "main_node": project.main_node,
+                 "research_start": project.research_start, "research_end": project.research_end},
+        classification_envelope=envelope, market=optional("market_metrics.json"), competition=optional("competition.json"),
+        new_products=optional("new_products.json"), context=optional("analysis_context.json") or {},
+        approvals=approvals, external_index=list(external["index"]) if external else [], deep_dive=deep_dive,
+        sources={name: _sha256_file(pdir / name) if (pdir / name).is_file() else None
+                 for name in ("records.json", "classification.json", "market_metrics.json")},
+        human_notes=[note.strip() for note in (args.note or []) if note.strip()],
+    )
+    result = _kb(args).archive(payload, utc_now_iso())
+    _emit({"project_id": args.project, **result, "kb": str(Path(args.kb).resolve()),
+           "note": "归档的人工备注只来自 --note;系统不生成商业结论。同内容重复归档是幂等的,内容变化会新增版本",
+           "next": "kb-search / kb-labels / kb-lookup 复用历史"})
+
+
+def cmd_kb_search(args: argparse.Namespace) -> None:
+    results = _kb(args).search(args.query, marketplace=args.marketplace, limit=args.limit)
+    _emit({"query": args.query, "count": len(results), "results": results,
+           "next": "kb-show --project <id> 查看完整归档;kb-labels 取历史分类体系作参考" if results else "知识库里没有匹配的历史项目"})
+
+
+def cmd_kb_labels(args: argparse.Namespace) -> None:
+    suggestions = _kb(args).label_suggestions(args.query, marketplace=args.marketplace, limit=args.limit)
+    _emit({"query": args.query, "count": len(suggestions), "suggestions": suggestions,
+           "note": "仅供参考:在新项目里用 classify --label/--rule 显式采用后,仍须 classification_review 人工确认"})
+
+
+def cmd_kb_lookup(args: argparse.Namespace) -> None:
+    found = _kb(args).lookup_asins(args.asin)
+    _emit({"asins": found, "unseen": sorted(asin for asin, rows in found.items() if not rows),
+           "note": "历史标签来自过往项目的人工确认分类,仅供抽查对照,不会自动写入当前项目"})
+
+
+def cmd_kb_show(args: argparse.Namespace) -> None:
+    if args.project is None and args.archive_id is None:
+        raise ValueError("需要 --project 或 --archive-id")
+    record = _kb(args).get(archive_id=args.archive_id, project_id=args.project)
+    if record is None:
+        raise KeyError("知识库中没有该归档")
+    payload = record["payload"]
+    if not args.full:  # 默认不打印逐 ASIN 标签与全部扁平指标,避免输出过长
+        payload = {**payload, "metrics": f"{len(payload['metrics'])} 项扁平指标(--full 查看)",
+                   "classification": {**payload["classification"], "asin_labels": f"{len(payload['classification']['asin_labels'])} 个 ASIN(--full 查看)"}}
+    _emit({"archive_id": record["archive_id"], "archived_at": record["archived_at"], "payload_sha256": record["payload_sha256"], "payload": payload})
+
+
 def cmd_deep_dive(args: argparse.Namespace) -> None:
     svc = _service(args)
     if svc.store.get_project(args.project) is None:
@@ -1680,6 +1754,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--db", default=os.environ.get("RESEARCH_DB_PATH", str(ROOT / "runtime" / "research.db")))
     parser.add_argument("--root", default=str(ROOT / "runtime" / "projects"))
+    parser.add_argument("--kb", default=os.environ.get("RESEARCH_KB_PATH", str(ROOT / "runtime" / "knowledge.db")),
+                        help="历史知识库 SQLite 路径(T5)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("init", help="创建研究项目")
@@ -1808,6 +1884,33 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--geo", help="tiktok-units 含多个 geo/segment 时指定")
     p.add_argument("--segment")
     p.set_defaults(func=cmd_build_cross_channel)
+
+    p = sub.add_parser("kb-archive", help="T5:把已完成项目归档进历史知识库(分类体系/指标摘要/阈值/审批/证据索引/人工备注)")
+    p.add_argument("--project", required=True)
+    p.add_argument("--note", action="append", default=[], help="归档人写的人工备注(口径/经验),可多次;系统不生成")
+    p.set_defaults(func=cmd_kb_archive)
+
+    p = sub.add_parser("kb-search", help="T5:按品类/关键词检索历史项目")
+    p.add_argument("--query", required=True)
+    p.add_argument("--marketplace")
+    p.add_argument("--limit", type=int, default=10)
+    p.set_defaults(func=cmd_kb_search)
+
+    p = sub.add_parser("kb-labels", help="T5:取匹配历史项目的分类体系作参考(复用须经 classification_review)")
+    p.add_argument("--query", required=True)
+    p.add_argument("--marketplace")
+    p.add_argument("--limit", type=int, default=5)
+    p.set_defaults(func=cmd_kb_labels)
+
+    p = sub.add_parser("kb-lookup", help="T5:按 ASIN 查历史上被人工确认过的分类")
+    p.add_argument("--asin", action="append", required=True)
+    p.set_defaults(func=cmd_kb_lookup)
+
+    p = sub.add_parser("kb-show", help="T5:查看一条归档")
+    p.add_argument("--project")
+    p.add_argument("--archive-id", type=int)
+    p.add_argument("--full", action="store_true")
+    p.set_defaults(func=cmd_kb_show)
 
     p = sub.add_parser("deep-dive", help="T2-8 深挖执行:汇总已算指标+已登记证据,列出证据缺口(不出商业结论)")
     p.add_argument("--project", required=True)
