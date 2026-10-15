@@ -50,3 +50,6 @@ class ResearchDossierInput:
     # 外部证据与预测(external_ingest.load_external 的输出,按 kind 分节);缺省 None 向后兼容,
     # 为 None 时报告不含「外部证据与预测」章节、工作簿不含外部_* 工作表。
     external: dict[str, Any] | None = None
+    # 深挖研究(deep_dive.project.load_for_dossier 的输出);缺省 None 向后兼容,
+    # 为 None 时报告写「未执行深挖」、工作簿不含深挖_* 工作表。
+    deep_dive: dict[str, Any] | None = None

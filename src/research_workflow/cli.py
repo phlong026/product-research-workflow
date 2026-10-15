@@ -60,6 +60,8 @@ from research_workflow.connectors.sellersprite import SellerSpriteConnector
 from research_workflow.domain import ProjectStatus, StepStatus
 from research_workflow.domain.models import utc_now_iso
 from research_workflow import external_ingest
+from research_workflow.deep_dive import SUPPORTED_MODULES
+from research_workflow.deep_dive import project as deep_dive_project
 from research_workflow.dossier import (
     ResearchDossierGenerator,
     ResearchDossierInput,
@@ -302,7 +304,7 @@ STAGES = ["collect_bsr", "data_review", "enrich_asins", "enrichment_review", "cl
           "apply_route_review", "dossier"]
 DERIVED_FILES = {"collect_bsr": ["table2_edits.json", "coverage.json", "table_edits.json"], "enrich_asins": ["enrichment.json"], "classify": ["classification.json"], "market_metrics": ["market_metrics.json",
                  "market_analysis.json", "competition.json", "new_products.json", "route_plan.json",
-                 "analysis_context.json", "new_product_queue.json", "iteration.json"]}
+                 "analysis_context.json", "new_product_queue.json", "iteration.json", "deep_dive.json"]}
 
 
 def _hashes(pdir: Path, names: list[str]) -> dict[str, str | None]:
@@ -1170,7 +1172,14 @@ def cmd_dossier(args: argparse.Namespace) -> None:
         }
         for month, item in sorted(quality.items())
     ]
-    missing_evidence: list[str] = ["研究路线确认仅登记，支线尚未自动执行"]
+    deep_dive = deep_dive_project.load_for_dossier(pdir)  # 输入变化后的过期深挖在此报错
+    if deep_dive is None:
+        missing_evidence: list[str] = ["研究路线确认后尚未执行深挖(未运行 deep-dive)"]
+    else:
+        missing_evidence = []
+        missing_evidence += [f"深挖模块无法自动执行:{item['module']}({item['reason']})" for item in deep_dive["report"]["unsupported"]]
+        missing_evidence += [f"深挖证据缺失:{section['title']}/{slot['label']}" for section in deep_dive["report"]["sections"]
+                             for slot in section["slots"] if slot["status"] == "missing"]
     if context.get("classification_provider", "rules") == "rules":
         missing_evidence.append("当前采用规则分类，未调用 LLM 分类")
     if context.get("enrichment") != "done":
@@ -1196,7 +1205,7 @@ def cmd_dossier(args: argparse.Namespace) -> None:
     evidence_names = ["records.json", "quality.json", "sources.json", "classification.json", "analysis_context.json",
                       "market_metrics.json", "market_analysis.json", "competition.json", "new_products.json", "route_plan.json",
                       "new_product_queue.json", "iteration.json", "enrichment.json", "coverage.json",
-                      "table2_edits.json", "table_edits.json"]
+                      "table2_edits.json", "table_edits.json", "deep_dive.json"]
     evidence_files = {name: pdir / name for name in evidence_names if (pdir / name).is_file()}
     evidence_files.update({source.sha256 + Path(source.source).suffix: (Path(source.source) if Path(source.source).is_absolute() else pdir / source.source) for source in sources})
     evidence_files.update(external_ingest.evidence_files(pdir))
@@ -1235,6 +1244,7 @@ def cmd_dossier(args: argparse.Namespace) -> None:
             data_quality=data_quality,
             missing_evidence=missing_evidence,
             external=external,
+            deep_dive=deep_dive,
             metadata={**context, "approved_checkpoints": svc.store.get_state(args.project).get("approved_checkpoints", {})},
         ),
         output, evidence_files=evidence_files, approval_history=approval_history,
@@ -1314,6 +1324,24 @@ def cmd_build_cross_channel(args: argparse.Namespace) -> None:
         "file": str(pdir / external_ingest.EXTERNAL_DIR / external_ingest.CROSS_CHANNEL_NAME),
         "note": "仅事实整合,不含商业建议;决策栏由人工填写。证据登记,不是人工检查点",
         "next": "dossier",
+    })
+
+
+def cmd_deep_dive(args: argparse.Namespace) -> None:
+    svc = _service(args)
+    if svc.store.get_project(args.project) is None:
+        raise KeyError(f"Unknown project: {args.project}")
+    pdir = _project_dir(args, args.project)
+    explicit = [item.strip() for item in (args.modules or "").split(",") if item.strip()]
+    doc = deep_dive_project.build(pdir, explicit, utc_now_iso())
+    report = doc["report"]
+    _emit({
+        "project_id": args.project, "confirmed_routes": report["confirmed_route_ids"], "modules": report["requested_modules"],
+        "sections": [{"module": s["module"], "title": s["title"], "facts": len(s["facts"]),
+                      "missing_slots": [slot["label"] for slot in s["slots"] if slot["status"] == "missing"]} for s in report["sections"]],
+        "unsupported": report["unsupported"], "file": str(pdir / deep_dive_project.DEEP_DIVE_FILE),
+        "note": "只汇总已算指标与已登记证据并列出缺口,不含商业结论;缺的证据用 import-evidence 补齐后重跑本命令",
+        "next": "补证据后重跑 deep-dive,或 dossier",
     })
 
 
@@ -1780,6 +1808,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--geo", help="tiktok-units 含多个 geo/segment 时指定")
     p.add_argument("--segment")
     p.set_defaults(func=cmd_build_cross_channel)
+
+    p = sub.add_parser("deep-dive", help="T2-8 深挖执行:汇总已算指标+已登记证据,列出证据缺口(不出商业结论)")
+    p.add_argument("--project", required=True)
+    p.add_argument("--modules", default="", help="额外/显式深挖模块,逗号分隔;缺省只执行人工确认路线展开的模块。可选: " + ",".join(SUPPORTED_MODULES))
+    p.set_defaults(func=cmd_deep_dive)
 
     p = sub.add_parser("dossier", help="生成研究资料包")
     p.add_argument("--project", required=True)
