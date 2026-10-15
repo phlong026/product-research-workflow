@@ -42,7 +42,7 @@ UPLOAD_EXTENSIONS = {".csv", ".xlsx", ".json"}
 ARTIFACTS = {
     "records.json", "quality.json", "sources.json", "coverage.json", "nodes.json", "enrichment.json",
     "classification.json", "market_metrics.json", "market_analysis.json", "competition.json",
-    "new_products.json", "new_product_queue.json", "iteration.json", "route_plan.json", "analysis_context.json",
+    "new_products.json", "new_product_queue.json", "iteration.json", "route_plan.json", "analysis_context.json", "deep_dive.json",
 }
 STATIC_DIR = Path(__file__).parent / "static"
 

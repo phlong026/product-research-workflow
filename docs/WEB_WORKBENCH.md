@@ -63,10 +63,11 @@ uv pip install -e '.[dev,workflow,data,xlsx]' -p .venv
 | `classify` | `{labels:{key:名称}, rules?:{key:"词1,词2"}, dimension?, provider?: rules\|llm}` → `classification_review` 检查点(不再支持 `enrich` 参数,补齐是独立步骤);`needs_review` 行必须在 resolve 时用 `edits` 指定 |
 | `analyze` | `{new_products_upload?, sales_threshold?(无默认,仅作回退), consecutive_months?, early_window?, promotion_threshold?, retention_threshold?, study_month?, pairs?, periods?}` → `research_route_review` 检查点 |
 | `resolve` | `{checkpoint_id, approve: bool, edits?:{ASIN:标签}, select?:[route_id...]}` —— **只能由用户明确点击触发,前端不得自动批准** |
+| `deep-dive` | `{modules?: [模块名]}` → 汇总已算指标与已登记证据并列出证据缺口(只读派生工件 `deep_dive.json`,可经 exports 下载);缺省执行人工确认路线展开的模块 |
 | `reconcile` | `{upload}`(参考表,列 key,expected[,tolerance_abs,tolerance_pct]) → 只读对账,结果写 `exports/reconcile.csv` |
 | `export-table` | `{table: 1\|2\|3}` → 生成 `exports/table{n}.csv`,经 exports 接口下载 |
 | `import-table` | `{table, upload: upload_id}` → 校验人工修改后的表;成功后旧审批失效并重新请求对应检查点(表1→data_review,表3→classification_review,表2→需重跑 classify);校验失败不改任何状态 |
-| `import-evidence` | `{kind: trends\|report-excerpts\|tiktok-units\|patents\|patent-search-log\|ads\|big-brand\|offsite\|cross-category, upload: upload_id, meta?: {key: value}}` → 登记外部证据(证据登记不是人工检查点,但文件哈希进入资料包 manifest);各 kind 必填的 meta 见 `skill/SKILL.md` |
+| `import-evidence` | `{kind: trends\|report-excerpts\|tiktok-units\|patents\|patent-search-log\|ads\|big-brand\|offsite\|cross-category\|keywords\|scenarios\|voc, upload: upload_id, meta?: {key: value}}` → 登记外部证据(证据登记不是人工检查点,但文件哈希进入资料包 manifest);各 kind 必填的 meta 见 `skill/SKILL.md` |
 | `build-market-forecast` | `{horizon_years, scope?: top_sample, method?: cagr\|linear, granularity?: monthly\|annual, target_scope?, coverage_ratio?, coverage_source?, low_growth?, high_growth?}` → 预测(跨口径外推必须带有来源的覆盖率) |
 | `build-cross-channel` | `{geo?: global\|us, segment?: total\|countertop}` → Amazon+TikTok 事实整合(不含任何 Yes/No) |
 | `dossier` | `{}` → 服务端选择新版本目录 |
